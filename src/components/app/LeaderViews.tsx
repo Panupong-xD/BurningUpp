@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import {
   DIMENSION_LABELS,
@@ -9,14 +9,26 @@ import {
   MOOD_LEVELS,
   MOOD_LEVEL_MAP,
 } from '@/lib/constants';
-import { buildTeamObservations, formatThaiDate, formatThaiShortDate } from '@/lib/wellbeing';
+import {
+  campaignSchema,
+  invitationCreateSchema,
+  teamSchema,
+  workspaceSettingsSchema,
+} from '@/lib/validation';
+import {
+  buildTeamObservations,
+  formatThaiDate,
+  formatThaiShortDate,
+  getBangkokIsoDateOffset,
+  getTodayIsoDate,
+} from '@/lib/wellbeing';
 import { MoodIllustration } from '@/components/ui/MoodIcon';
 import { StatusBanner, UI_BTN_PRIMARY, UI_CARD, UI_INPUT, UI_SUBCARD } from '@/components/ui/Surface';
 import type {
   AssessmentCampaignRow,
   AssessmentTemplateRow,
+  DirectoryMemberRow,
   InvitationRow,
-  ProfileRow,
   TeamMemberRow,
   TeamRow,
   TeamWellbeingInsights,
@@ -30,12 +42,14 @@ const DIMS = ['energy_exhaustion', 'workload_balance', 'work_engagement'] as con
 
 export function LeaderFilterBar({
   teams,
+  canViewAllTeams = true,
   selectedTeamId,
   onSelectTeam,
   periodDays,
   onSelectPeriod,
 }: {
   teams: TeamRow[];
+  canViewAllTeams?: boolean;
   selectedTeamId: string | null;
   onSelectTeam: (teamId: string | null) => void;
   periodDays: number;
@@ -47,11 +61,11 @@ export function LeaderFilterBar({
         <label htmlFor="leaderTeamFilter" className="text-xs font-medium text-stone-600">ทีม:</label>
         <select
           id="leaderTeamFilter"
-          value={selectedTeamId || 'ALL'}
+          value={selectedTeamId || (canViewAllTeams ? 'ALL' : teams[0]?.id || '')}
           onChange={(e) => onSelectTeam(e.target.value === 'ALL' ? null : e.target.value)}
           className="rounded-xl border border-stone-300 bg-white px-3 py-2 text-xs font-semibold text-stone-800 focus:border-teal-700 focus:outline-hidden"
         >
-          <option value="ALL">ทุกทีมในพื้นที่ทำงาน</option>
+          {canViewAllTeams && <option value="ALL">ทุกทีมในพื้นที่ทำงาน</option>}
           {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
         </select>
       </div>
@@ -108,22 +122,26 @@ function DimensionProgressList({
 export function LeaderOverviewView({
   workspace,
   teams,
+  canViewAllTeams = true,
   selectedTeamId,
   onSelectTeam,
   periodDays,
   onSelectPeriod,
   insights,
   loadingInsights,
+  insightsError = null,
   onNavigate,
 }: {
   workspace: WorkspaceRow;
   teams: TeamRow[];
+  canViewAllTeams?: boolean;
   selectedTeamId: string | null;
   onSelectTeam: (teamId: string | null) => void;
   periodDays: number;
   onSelectPeriod: (days: number) => void;
   insights: TeamWellbeingInsights | null;
   loadingInsights: boolean;
+  insightsError?: string | null;
   onNavigate: (tab: LeaderTab) => void;
 }) {
   const observations = insights ? buildTeamObservations(insights) : [];
@@ -132,6 +150,8 @@ export function LeaderOverviewView({
     insights?.mood.avg_mood != null && insights?.mood.prev_avg_mood != null
       ? Math.round((insights.mood.avg_mood - insights.mood.prev_avg_mood) * 100) / 100
       : null;
+
+  const visibleTrend = insights ? insights.mood.trend.slice(-14) : [];
 
   return (
     <div className="space-y-6">
@@ -143,10 +163,19 @@ export function LeaderOverviewView({
           <h1 className="text-2xl font-bold text-stone-900 mt-0.5">ภาพรวมสุขภาวะของทีม ({selectedTeamName})</h1>
           <p className="text-sm text-stone-600">สรุปแนวโน้มอารมณ์และการมีส่วนร่วมของสมาชิกเพื่อวางแผนดูแลทีมอย่างเหมาะสม</p>
         </div>
-        <LeaderFilterBar teams={teams} selectedTeamId={selectedTeamId} onSelectTeam={onSelectTeam} periodDays={periodDays} onSelectPeriod={onSelectPeriod} />
+        <LeaderFilterBar
+          teams={teams}
+          canViewAllTeams={canViewAllTeams}
+          selectedTeamId={selectedTeamId}
+          onSelectTeam={onSelectTeam}
+          periodDays={periodDays}
+          onSelectPeriod={onSelectPeriod}
+        />
       </div>
 
-      {loadingInsights || !insights ? (
+      {insightsError ? (
+        <StatusBanner type="error" message={insightsError} />
+      ) : loadingInsights || !insights ? (
         <div className="rounded-3xl border border-stone-200 bg-white p-12 text-center text-sm text-stone-500">
           <Loader2 className="mx-auto h-6 w-6 animate-spin text-teal-700 mb-2" />กำลังโหลดข้อมูลสรุปของทีม...
         </div>
@@ -209,23 +238,27 @@ export function LeaderOverviewView({
                 </div>
                 <button type="button" onClick={() => onNavigate('mood-insights')} className="text-xs font-semibold text-teal-700 hover:underline shrink-0">ดูรายละเอียด</button>
               </div>
-              <div className="grid grid-cols-7 sm:grid-cols-14 gap-1.5 items-end pt-4 h-44 border-b border-stone-100 pb-2">
-                {insights.mood.trend.slice(-14).map((pt) => {
+              <div className={`grid gap-1.5 pt-2 h-44 border-b border-stone-100 pb-2 ${visibleTrend.length <= 7 ? 'grid-cols-7' : 'grid-cols-7 sm:grid-cols-14'}`}>
+                {visibleTrend.map((pt) => {
                   const hasVal = pt.avg_mood !== null;
                   const heightPct = hasVal ? Math.max(18, Math.round(((pt.avg_mood || 0) / 5) * 100)) : 10;
                   const roundedLvl = hasVal ? (Math.min(5, Math.max(1, Math.round(pt.avg_mood || 3))) as 1 | 2 | 3 | 4 | 5) : null;
                   return (
                     <div
                       key={pt.date}
-                      className="flex flex-col items-center justify-end h-full gap-1.5"
+                      className="flex flex-col items-center h-full gap-1"
                       title={hasVal ? `${pt.date}: เฉลี่ย ${pt.avg_mood} (${pt.checkin_count} คน)` : `${pt.date}: ไม่มีข้อมูลเช็กอิน`}
                     >
-                      {hasVal && <span className="text-[10px] font-bold text-stone-700">{Number(pt.avg_mood).toFixed(1)}</span>}
-                      <div
-                        className={`w-full max-w-[28px] rounded-t-lg transition-all ${hasVal ? 'bg-teal-600' : 'bg-stone-100'}`}
-                        style={{ height: `${heightPct}%`, backgroundColor: roundedLvl ? MOOD_LEVEL_MAP[roundedLvl]?.color : undefined }}
-                      />
-                      <span className="text-[10px] text-stone-500 truncate">{formatThaiShortDate(pt.date)}</span>
+                      <span className="text-[10px] font-bold text-stone-700 h-3.5 leading-none">
+                        {hasVal ? Number(pt.avg_mood).toFixed(1) : ''}
+                      </span>
+                      <div className="flex-1 w-full flex items-end justify-center min-h-0">
+                        <div
+                          className={`w-full max-w-[28px] rounded-t-lg transition-all ${hasVal ? 'bg-teal-600' : 'bg-stone-100'}`}
+                          style={{ height: `${heightPct}%`, backgroundColor: roundedLvl ? MOOD_LEVEL_MAP[roundedLvl]?.color : undefined }}
+                        />
+                      </div>
+                      <span className="text-[10px] text-stone-500 truncate max-w-full">{formatThaiShortDate(pt.date)}</span>
                     </div>
                   );
                 })}
@@ -266,7 +299,7 @@ export function LeaderOverviewView({
               )}
 
               <div className="border-t border-stone-100 pt-3 flex items-center justify-between text-xs text-stone-500">
-                <span>เกณฑ์คุ้มครองข้อมูลส่วนบุคคล: ขั้นต่ำ 5 คน</span>
+                <span>เกณฑ์คุ้มครองข้อมูลส่วนบุคคล: ขั้นต่ำ {insights.assessment.min_required} คน</span>
                 <button type="button" onClick={() => onNavigate('reports')} className="font-semibold text-teal-700 hover:underline">บันทึกกิจกรรมดูแลทีม →</button>
               </div>
             </div>
@@ -305,26 +338,31 @@ export function LeaderOverviewView({
 export function TeamsManagementView({
   workspace,
   isWorkspaceOwner,
+  isWorkspaceLeader,
   teams,
+  managedTeams,
   teamMembers,
-  profilesMap,
+  directoryMap,
   invitations,
   currentUserId,
   onRefresh,
 }: {
   workspace: WorkspaceRow;
   isWorkspaceOwner: boolean;
+  isWorkspaceLeader: boolean;
   teams: TeamRow[];
+  managedTeams: TeamRow[];
   teamMembers: TeamMemberRow[];
-  profilesMap: Record<string, ProfileRow>;
+  directoryMap: Record<string, DirectoryMemberRow>;
   invitations: InvitationRow[];
   currentUserId: string;
   onRefresh: () => Promise<void>;
 }) {
+  const managedTeamIds = useMemo(() => new Set(managedTeams.map((t) => t.id)), [managedTeams]);
   const [newTeamName, setNewTeamName] = useState('');
   const [newTeamDesc, setNewTeamDesc] = useState('');
   const [creatingTeam, setCreatingTeam] = useState(false);
-  const [inviteTeamId, setInviteTeamId] = useState<string>(teams[0]?.id || '');
+  const [inviteTeamId, setInviteTeamId] = useState<string>(managedTeams[0]?.id || '');
   const [inviteRole, setInviteRole] = useState<'member' | 'leader'>('member');
   const [inviteEmail, setInviteEmail] = useState('');
   const [creatingInvite, setCreatingInvite] = useState(false);
@@ -336,14 +374,32 @@ export function TeamsManagementView({
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    setWsName(workspace.name);
+    setWsOrgName(workspace.organization_name || '');
+    setWsMinGroup(workspace.min_group_size || 5);
+  }, [workspace.name, workspace.organization_name, workspace.min_group_size]);
+
+  useEffect(() => {
+    if (!inviteTeamId || !managedTeams.some((t) => t.id === inviteTeamId)) {
+      setInviteTeamId(managedTeams[0]?.id || '');
+    }
+  }, [managedTeams, inviteTeamId]);
+
   async function handleCreateTeam(e: React.FormEvent) {
     e.preventDefault();
     setError(null); setFeedback(null);
-    if (!newTeamName.trim()) return;
+    const parsed = teamSchema.safeParse({ name: newTeamName, description: newTeamDesc });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message || 'กรุณาตรวจสอบข้อมูลทีม');
+      return;
+    }
     setCreatingTeam(true);
     try {
       const { error: rpcError } = await createClient().rpc('create_team_in_workspace', {
-        p_workspace_id: workspace.id, p_name: newTeamName.trim(), p_description: newTeamDesc.trim(),
+        p_workspace_id: workspace.id,
+        p_name: parsed.data.name,
+        p_description: parsed.data.description,
       });
       if (rpcError) setError(rpcError.message);
       else {
@@ -357,13 +413,25 @@ export function TeamsManagementView({
   async function handleCreateInvitation(e: React.FormEvent) {
     e.preventDefault();
     setError(null); setFeedback(null);
-    const targetTeamId = inviteTeamId || teams[0]?.id;
-    if (!targetTeamId) return;
+    const targetTeamId = inviteTeamId || managedTeams[0]?.id || '';
+    const parsed = invitationCreateSchema.safeParse({
+      teamId: targetTeamId,
+      assignedRole: inviteRole,
+      invitedEmail: inviteEmail,
+    });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message || 'กรุณาตรวจสอบข้อมูลคำเชิญ');
+      return;
+    }
     setCreatingInvite(true);
     try {
       const { error: rpcError } = await createClient().rpc('create_team_invitation', {
-        p_workspace_id: workspace.id, p_team_id: targetTeamId, p_invited_email: inviteEmail.trim() || null,
-        p_assigned_role: inviteRole, p_max_uses: inviteEmail.trim() ? 1 : 50, p_expires_days: 14,
+        p_workspace_id: workspace.id,
+        p_team_id: parsed.data.teamId,
+        p_invited_email: parsed.data.invitedEmail || null,
+        p_assigned_role: parsed.data.assignedRole,
+        p_max_uses: parsed.data.invitedEmail ? 1 : 50,
+        p_expires_days: 14,
       });
       if (rpcError) setError(rpcError.message);
       else {
@@ -374,42 +442,82 @@ export function TeamsManagementView({
   }
 
   async function handleRevokeInvitation(invId: string) {
-    await createClient().from('invitations').update({ status: 'revoked' }).eq('id', invId);
+    setError(null); setFeedback(null);
+    const { error: rpcErr } = await createClient().rpc('revoke_team_invitation', {
+      p_invitation_id: invId,
+    });
+    if (rpcErr) {
+      setError(rpcErr.message || 'ไม่สามารถยกเลิกรหัสคำเชิญได้');
+      return;
+    }
+    setFeedback('ยกเลิกรหัสคำเชิญเรียบร้อยแล้ว');
     await onRefresh();
   }
 
   async function handleToggleTeamRole(member: TeamMemberRow) {
     if (member.user_id === currentUserId) return;
-    await createClient().from('team_members').update({ role: member.role === 'leader' ? 'member' : 'leader' }).eq('id', member.id);
+    setError(null); setFeedback(null);
+    const { error: updErr } = await createClient()
+      .from('team_members')
+      .update({ role: member.role === 'leader' ? 'member' : 'leader' })
+      .eq('id', member.id);
+    if (updErr) {
+      setError(updErr.message || 'ไม่สามารถเปลี่ยนบทบาทของสมาชิกได้');
+      return;
+    }
+    setFeedback('อัปเดตบทบาทของสมาชิกในทีมเรียบร้อยแล้ว');
     await onRefresh();
   }
 
   async function handleRemoveTeamMember(memberId: string) {
-    await createClient().from('team_members').delete().eq('id', memberId);
+    setError(null); setFeedback(null);
+    const { error: delErr } = await createClient().from('team_members').delete().eq('id', memberId);
+    if (delErr) {
+      setError(delErr.message || 'ไม่สามารถนำสมาชิกออกจากทีมได้');
+      return;
+    }
+    setFeedback('นำสมาชิกออกจากทีมเรียบร้อยแล้ว');
     await onRefresh();
   }
 
   async function handleSaveWorkspaceSettings(e: React.FormEvent) {
     e.preventDefault();
-    if (!isWorkspaceOwner || !wsName.trim()) return;
-    setSavingWs(true); setFeedback(null);
+    if (!isWorkspaceOwner) return;
+    setError(null); setFeedback(null);
+    const parsed = workspaceSettingsSchema.safeParse({
+      name: wsName,
+      organizationName: wsOrgName,
+      minGroupSize: Math.floor(Number(wsMinGroup)),
+    });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message || 'กรุณาตรวจสอบการตั้งค่าพื้นที่ทำงาน');
+      return;
+    }
+    setSavingWs(true);
     try {
       const { error: updateErr } = await createClient().from('workspaces').update({
-        name: wsName.trim(), organization_name: wsOrgName.trim() || null,
-        min_group_size: Math.max(5, Number(wsMinGroup) || 5), updated_at: new Date().toISOString(),
+        name: parsed.data.name,
+        organization_name: parsed.data.organizationName || null,
+        min_group_size: parsed.data.minGroupSize,
+        updated_at: new Date().toISOString(),
       }).eq('id', workspace.id);
       if (updateErr) setError(updateErr.message);
       else { setFeedback('บันทึกการตั้งค่าพื้นที่ทำงานเรียบร้อยแล้ว'); await onRefresh(); }
     } finally { setSavingWs(false); }
   }
 
-  function copyInvite(token: string) {
-    navigator.clipboard.writeText(typeof window !== 'undefined' ? `${window.location.origin}/join/${token}` : token);
-    setCopiedToken(token);
-    setTimeout(() => setCopiedToken(null), 2000);
+  async function copyInvite(token: string) {
+    try {
+      await navigator.clipboard.writeText(typeof window !== 'undefined' ? `${window.location.origin}/join/${token}` : token);
+      setCopiedToken(token);
+      setTimeout(() => setCopiedToken(null), 2000);
+    } catch {
+      setError('ไม่สามารถคัดลอกลิงก์ได้ กรุณาคัดลอกรหัสด้วยตนเอง');
+    }
   }
 
-  const pendingInvitations = invitations.filter((i) => i.status === 'pending');
+  const pendingInvitations = invitations.filter((i) => i.status === 'pending' && managedTeamIds.has(i.team_id));
+  const displayedTeams = isWorkspaceLeader ? teams : managedTeams;
 
   return (
     <div className="space-y-6">
@@ -420,7 +528,7 @@ export function TeamsManagementView({
       {error && <StatusBanner type="error" message={error} />}
       {feedback && <StatusBanner type="success" message={feedback} />}
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className={`grid gap-6 ${isWorkspaceLeader ? 'lg:grid-cols-2' : ''}`}>
         <div className={`${UI_CARD} space-y-4`}>
           <div className="flex items-center gap-2.5">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-teal-50 text-teal-700"><UserPlus className="h-5 w-5" /></div>
@@ -434,8 +542,8 @@ export function TeamsManagementView({
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <label className="block text-xs font-medium text-stone-700">เลือกทีมที่ต้องการเชิญเข้า</label>
-                <select value={inviteTeamId || teams[0]?.id || ''} onChange={(e) => setInviteTeamId(e.target.value)} className={UI_INPUT}>
-                  {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                <select value={inviteTeamId || managedTeams[0]?.id || ''} onChange={(e) => setInviteTeamId(e.target.value)} className={UI_INPUT}>
+                  {managedTeams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               </div>
               <div>
@@ -448,9 +556,9 @@ export function TeamsManagementView({
             </div>
             <div>
               <label className="block text-xs font-medium text-stone-700">จำกัดเฉพาะอีเมล (ไม่บังคับ — เว้นว่างได้หากต้องการใช้เป็นรหัสรวมของทีม)</label>
-              <input type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="เว้นว่างเพื่อให้ทุกคนที่มีรหัสเข้าร่วมได้" className={UI_INPUT} />
+              <input type="email" maxLength={254} value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="เว้นว่างเพื่อให้ทุกคนที่มีรหัสเข้าร่วมได้" className={UI_INPUT} />
             </div>
-            <button type="submit" disabled={creatingInvite || teams.length === 0} className={`${UI_BTN_PRIMARY} text-xs`}>
+            <button type="submit" disabled={creatingInvite || managedTeams.length === 0} className={`${UI_BTN_PRIMARY} text-xs`}>
               {creatingInvite ? 'กำลังสร้างคำเชิญ...' : 'สร้างรหัสคำเชิญใหม่'}
             </button>
           </form>
@@ -464,7 +572,7 @@ export function TeamsManagementView({
                   return (
                     <div key={inv.id} className={`flex items-center justify-between gap-2 ${UI_SUBCARD} px-3.5 py-2.5 text-xs`}>
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="font-mono font-bold text-stone-900">{inv.token}</span>
                           <span className="rounded-md bg-white px-2 py-0.5 text-[11px] font-medium text-stone-700 border border-stone-200">{teamName}</span>
                           <span className="text-[11px] text-stone-500">({inv.assigned_role === 'leader' ? 'หัวหน้าทีม' : 'สมาชิก'})</span>
@@ -488,36 +596,39 @@ export function TeamsManagementView({
           )}
         </div>
 
-        <div className={`${UI_CARD} space-y-4`}>
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-50 text-amber-800"><Plus className="h-5 w-5" /></div>
-            <div>
-              <h2 className="text-base font-bold text-stone-900">สร้างทีมใหม่ในพื้นที่ทำงาน</h2>
-              <p className="text-xs text-stone-500">แบ่งทีมตามสายงานหรือโปรเจกต์เพื่อดูแนวโน้มแยกแต่ละทีมได้ชัดเจน</p>
+        {isWorkspaceLeader && (
+          <div className={`${UI_CARD} space-y-4`}>
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-50 text-amber-800"><Plus className="h-5 w-5" /></div>
+              <div>
+                <h2 className="text-base font-bold text-stone-900">สร้างทีมใหม่ในพื้นที่ทำงาน</h2>
+                <p className="text-xs text-stone-500">แบ่งทีมตามสายงานหรือโปรเจกต์เพื่อดูแนวโน้มแยกแต่ละทีมได้ชัดเจน</p>
+              </div>
             </div>
-          </div>
 
-          <form onSubmit={handleCreateTeam} className="space-y-3.5">
-            <div>
-              <label className="block text-xs font-medium text-stone-700">ชื่อทีม <span className="text-rose-600">*</span></label>
-              <input type="text" required value={newTeamName} onChange={(e) => setNewTeamName(e.target.value)} placeholder="เช่น ทีมวิศวกรรมซอฟต์แวร์ หรือ ทีมดูแลลูกค้า" className={UI_INPUT} />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-stone-700">คำอธิบายสั้นๆ (ไม่บังคับ)</label>
-              <input type="text" value={newTeamDesc} onChange={(e) => setNewTeamDesc(e.target.value)} placeholder="รายละเอียดเพิ่มเติมเกี่ยวกับทีมนี้" className={UI_INPUT} />
-            </div>
-            <button type="submit" disabled={creatingTeam || !newTeamName.trim()} className="inline-flex items-center justify-center gap-2 rounded-xl bg-stone-900 px-4 py-2.5 text-xs font-semibold text-white hover:bg-stone-800 disabled:opacity-50">
-              {creatingTeam ? 'กำลังสร้างทีม...' : '+ เพิ่มทีมใหม่'}
-            </button>
-          </form>
-        </div>
+            <form onSubmit={handleCreateTeam} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-medium text-stone-700">ชื่อทีม <span className="text-rose-600">*</span></label>
+                <input type="text" required maxLength={120} value={newTeamName} onChange={(e) => setNewTeamName(e.target.value)} placeholder="เช่น ทีมวิศวกรรมซอฟต์แวร์ หรือ ทีมดูแลลูกค้า" className={UI_INPUT} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-stone-700">คำอธิบายสั้นๆ (ไม่บังคับ)</label>
+                <input type="text" maxLength={400} value={newTeamDesc} onChange={(e) => setNewTeamDesc(e.target.value)} placeholder="รายละเอียดเพิ่มเติมเกี่ยวกับทีมนี้" className={UI_INPUT} />
+              </div>
+              <button type="submit" disabled={creatingTeam || !newTeamName.trim()} className="inline-flex items-center justify-center gap-2 rounded-xl bg-stone-900 px-4 py-2.5 text-xs font-semibold text-white hover:bg-stone-800 disabled:opacity-50">
+                {creatingTeam ? 'กำลังสร้างทีม...' : '+ เพิ่มทีมใหม่'}
+              </button>
+            </form>
+          </div>
+        )}
       </div>
 
       <div className="space-y-4">
-        <h2 className="text-lg font-bold text-stone-900">รายชื่อทีมและสมาชิก ({teams.length} ทีม)</h2>
+        <h2 className="text-lg font-bold text-stone-900">รายชื่อทีมและสมาชิก ({displayedTeams.length} ทีม)</h2>
         <div className="grid gap-5 md:grid-cols-2">
-          {teams.map((team) => {
+          {displayedTeams.map((team) => {
             const membersOfTeam = teamMembers.filter((tm) => tm.team_id === team.id);
+            const canManageThisTeam = managedTeamIds.has(team.id);
             return (
               <div key={team.id} className={`${UI_CARD} space-y-4`}>
                 <div className="flex items-start justify-between gap-2 border-b border-stone-100 pb-3">
@@ -532,8 +643,10 @@ export function TeamsManagementView({
                 ) : (
                   <div className="divide-y divide-stone-100">
                     {membersOfTeam.map((tm) => {
-                      const prof = profilesMap[tm.user_id];
+                      const prof = directoryMap[tm.user_id];
                       const isSelf = tm.user_id === currentUserId;
+                      const isTargetOwner = prof?.workspace_role === 'owner';
+                      const canEditMember = canManageThisTeam && !isSelf && !isTargetOwner;
                       return (
                         <div key={tm.id} className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-3">
                           <div>
@@ -544,9 +657,9 @@ export function TeamsManagementView({
                           </div>
                           <div className="flex items-center gap-2">
                             <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${tm.role === 'leader' ? 'bg-teal-50 text-teal-800 border border-teal-200' : 'bg-stone-100 text-stone-700'}`}>
-                              {tm.role === 'leader' ? 'หัวหน้าทีม' : 'สมาชิก'}
+                              {isTargetOwner ? 'เจ้าของพื้นที่ทำงาน' : tm.role === 'leader' ? 'หัวหน้าทีม' : 'สมาชิก'}
                             </span>
-                            {!isSelf && (
+                            {canEditMember && (
                               <>
                                 <button type="button" onClick={() => handleToggleTeamRole(tm)} className="text-xs font-medium text-teal-700 hover:underline">สลับบทบาท</button>
                                 <button type="button" onClick={() => handleRemoveTeamMember(tm.id)} className="text-xs font-medium text-rose-600 hover:underline">นำออก</button>
@@ -573,14 +686,14 @@ export function TeamsManagementView({
           <form onSubmit={handleSaveWorkspaceSettings} className="grid gap-4 sm:grid-cols-3 items-end">
             <div>
               <label className="block text-xs font-medium text-stone-700">ชื่อพื้นที่ทำงาน</label>
-              <input type="text" required value={wsName} onChange={(e) => setWsName(e.target.value)} className={UI_INPUT} />
+              <input type="text" required maxLength={120} value={wsName} onChange={(e) => setWsName(e.target.value)} className={UI_INPUT} />
             </div>
             <div>
               <label className="block text-xs font-medium text-stone-700">ชื่อองค์กร (ไม่บังคับ)</label>
-              <input type="text" value={wsOrgName} onChange={(e) => setWsOrgName(e.target.value)} placeholder="ระบุชื่อองค์กร" className={UI_INPUT} />
+              <input type="text" maxLength={120} value={wsOrgName} onChange={(e) => setWsOrgName(e.target.value)} placeholder="ระบุชื่อองค์กร" className={UI_INPUT} />
             </div>
             <div>
-              <label className="block text-xs font-medium text-stone-700">จำนวนผู้ตอบขั้นต่ำก่อนแสดงผลรวม (ขั้นต่ำ 5 คน)</label>
+              <label className="block text-xs font-medium text-stone-700">จำนวนผู้ตอบขั้นต่ำก่อนแสดงผลรวม (5–50 คน)</label>
               <div className="mt-1 flex items-center gap-2">
                 <input type="number" min={5} max={50} value={wsMinGroup} onChange={(e) => setWsMinGroup(Number(e.target.value))} className="block w-24 rounded-xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900" />
                 <button type="submit" disabled={savingWs} className="rounded-xl bg-teal-700 px-4 py-2 text-xs font-semibold text-white hover:bg-teal-800 disabled:opacity-50">
@@ -597,20 +710,24 @@ export function TeamsManagementView({
 
 export function LeaderMoodInsightsView({
   teams,
+  canViewAllTeams = true,
   selectedTeamId,
   onSelectTeam,
   periodDays,
   onSelectPeriod,
   insights,
   loadingInsights,
+  insightsError = null,
 }: {
   teams: TeamRow[];
+  canViewAllTeams?: boolean;
   selectedTeamId: string | null;
   onSelectTeam: (teamId: string | null) => void;
   periodDays: number;
   onSelectPeriod: (days: number) => void;
   insights: TeamWellbeingInsights | null;
   loadingInsights: boolean;
+  insightsError?: string | null;
 }) {
   return (
     <div className="space-y-6">
@@ -619,10 +736,19 @@ export function LeaderMoodInsightsView({
           <h1 className="text-2xl font-bold text-stone-900">แนวโน้มอารมณ์ของทีม</h1>
           <p className="text-sm text-stone-600">วิเคราะห์สัดส่วนความรู้สึก การมีส่วนร่วม และปัจจัยแวดล้อมที่สมาชิกในทีมระบุ</p>
         </div>
-        <LeaderFilterBar teams={teams} selectedTeamId={selectedTeamId} onSelectTeam={onSelectTeam} periodDays={periodDays} onSelectPeriod={onSelectPeriod} />
+        <LeaderFilterBar
+          teams={teams}
+          canViewAllTeams={canViewAllTeams}
+          selectedTeamId={selectedTeamId}
+          onSelectTeam={onSelectTeam}
+          periodDays={periodDays}
+          onSelectPeriod={onSelectPeriod}
+        />
       </div>
 
-      {loadingInsights || !insights ? (
+      {insightsError ? (
+        <StatusBanner type="error" message={insightsError} />
+      ) : loadingInsights || !insights ? (
         <div className="rounded-3xl border border-stone-200 bg-white p-12 text-center text-sm text-stone-500">กำลังโหลดข้อมูลแนวโน้มอารมณ์...</div>
       ) : (
         <div className="grid gap-6 lg:grid-cols-12">
@@ -689,12 +815,14 @@ export function LeaderMoodInsightsView({
 export function LeaderAssessmentsView({
   workspace,
   teams,
+  canViewAllTeams = true,
   selectedTeamId,
   onSelectTeam,
   periodDays,
   onSelectPeriod,
   insights,
   loadingInsights,
+  insightsError = null,
   campaigns,
   template,
   userId,
@@ -702,12 +830,14 @@ export function LeaderAssessmentsView({
 }: {
   workspace: WorkspaceRow;
   teams: TeamRow[];
+  canViewAllTeams?: boolean;
   selectedTeamId: string | null;
   onSelectTeam: (teamId: string | null) => void;
   periodDays: number;
   onSelectPeriod: (days: number) => void;
   insights: TeamWellbeingInsights | null;
   loadingInsights: boolean;
+  insightsError?: string | null;
   campaigns: AssessmentCampaignRow[];
   template: AssessmentTemplateRow | null;
   userId: string;
@@ -717,18 +847,46 @@ export function LeaderAssessmentsView({
   const [newCampaignTeamId, setNewCampaignTeamId] = useState<string>(selectedTeamId || teams[0]?.id || '');
   const [creatingCampaign, setCreatingCampaign] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedTeamId && teams.some((t) => t.id === selectedTeamId)) {
+      setNewCampaignTeamId(selectedTeamId);
+    } else if (!newCampaignTeamId || !teams.some((t) => t.id === newCampaignTeamId)) {
+      setNewCampaignTeamId(teams[0]?.id || '');
+    }
+  }, [selectedTeamId, teams, newCampaignTeamId]);
 
   async function handleCreateCampaign(e: React.FormEvent) {
     e.preventDefault();
-    if (!template || !newCampaignTitle.trim()) return;
-    setCreatingCampaign(true); setMsg(null);
+    if (!template) return;
+    setMsg(null); setError(null);
+    const targetTeamId = newCampaignTeamId || teams[0]?.id || null;
+    const parsed = campaignSchema.safeParse({ title: newCampaignTitle, teamId: targetTeamId });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message || 'กรุณาตรวจสอบข้อมูลรอบการสำรวจ');
+      return;
+    }
+
+    setCreatingCampaign(true);
     try {
-      await createClient().from('assessment_campaigns').insert({
-        workspace_id: workspace.id, team_id: newCampaignTeamId || null, template_id: template.id,
-        title: newCampaignTitle.trim(), description: 'รอบการสำรวจสมดุลการทำงานและความเหนื่อยล้าของทีม',
-        status: 'active', due_date: new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10), created_by: userId,
+      const { error: insertErr } = await createClient().from('assessment_campaigns').insert({
+        workspace_id: workspace.id,
+        team_id: parsed.data.teamId ?? null,
+        template_id: template.id,
+        title: parsed.data.title,
+        description: 'รอบการสำรวจสมดุลการทำงานและความเหนื่อยล้าของทีม',
+        status: 'active',
+        starts_at: getTodayIsoDate(),
+        due_date: getBangkokIsoDateOffset(14),
+        created_by: userId,
       });
-      setNewCampaignTitle(''); setMsg('เปิดรอบแบบประเมินใหม่ให้ทีมเรียบร้อยแล้ว');
+      if (insertErr) {
+        setError(insertErr.message || 'ไม่สามารถเปิดรอบแบบประเมินใหม่ได้');
+        return;
+      }
+      setNewCampaignTitle('');
+      setMsg('เปิดรอบแบบประเมินใหม่ให้ทีมเรียบร้อยแล้ว');
       await onRefresh();
     } finally { setCreatingCampaign(false); }
   }
@@ -740,12 +898,22 @@ export function LeaderAssessmentsView({
           <h1 className="text-2xl font-bold text-stone-900">ผลแบบประเมินสมดุลการทำงานของทีม</h1>
           <p className="text-sm text-stone-600">ติดตามอัตราการมีส่วนร่วมและผลสรุปภาพรวมของทีม (แสดงผลเมื่อมีผู้ตอบตั้งแต่ 5 คนขึ้นไป)</p>
         </div>
-        <LeaderFilterBar teams={teams} selectedTeamId={selectedTeamId} onSelectTeam={onSelectTeam} periodDays={periodDays} onSelectPeriod={onSelectPeriod} />
+        <LeaderFilterBar
+          teams={teams}
+          canViewAllTeams={canViewAllTeams}
+          selectedTeamId={selectedTeamId}
+          onSelectTeam={onSelectTeam}
+          periodDays={periodDays}
+          onSelectPeriod={onSelectPeriod}
+        />
       </div>
 
+      {error && <StatusBanner type="error" message={error} />}
       {msg && <StatusBanner type="success" message={msg} />}
 
-      {loadingInsights || !insights ? (
+      {insightsError ? (
+        <StatusBanner type="error" message={insightsError} />
+      ) : loadingInsights || !insights ? (
         <div className="rounded-3xl border border-stone-200 bg-white p-12 text-center text-sm text-stone-500">กำลังโหลดข้อมูลแบบประเมิน...</div>
       ) : (
         <div className="grid gap-6 lg:grid-cols-12">
@@ -800,7 +968,7 @@ export function LeaderAssessmentsView({
             <form onSubmit={handleCreateCampaign} className="space-y-3.5">
               <div>
                 <label className="block text-xs font-medium text-stone-700">ชื่อรอบการสำรวจ</label>
-                <input type="text" required value={newCampaignTitle} onChange={(e) => setNewCampaignTitle(e.target.value)} placeholder="เช่น สำรวจสมดุลการทำงานประจำเดือนพฤศจิกายน" className={UI_INPUT} />
+                <input type="text" required maxLength={160} value={newCampaignTitle} onChange={(e) => setNewCampaignTitle(e.target.value)} placeholder="เช่น สำรวจสมดุลการทำงานประจำเดือนพฤศจิกายน" className={UI_INPUT} />
               </div>
               <div>
                 <label className="block text-xs font-medium text-stone-700">สำหรับทีม</label>
@@ -808,7 +976,7 @@ export function LeaderAssessmentsView({
                   {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               </div>
-              <button type="submit" disabled={creatingCampaign || !newCampaignTitle.trim()} className={`w-full ${UI_BTN_PRIMARY} text-xs`}>
+              <button type="submit" disabled={creatingCampaign || !newCampaignTitle.trim() || !template} className={`w-full ${UI_BTN_PRIMARY} text-xs`}>
                 {creatingCampaign ? 'กำลังเปิดรอบสำรวจ...' : '+ เปิดรอบแบบสำรวจใหม่'}
               </button>
             </form>

@@ -1,12 +1,26 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Logo } from '@/components/ui/Logo';
-import { DailyCheckinView, MemberAssessmentsView, MemberOverviewView, MemberProfileView, MoodHistoryView, type MemberTab } from './MemberViews';
-import { LeaderAssessmentsView, LeaderMoodInsightsView, LeaderOverviewView, TeamsManagementView, type LeaderTab } from './LeaderViews';
+import { StatusBanner } from '@/components/ui/Surface';
+import {
+  DailyCheckinView,
+  MemberAssessmentsView,
+  MemberOverviewView,
+  MemberProfileView,
+  MoodHistoryView,
+  type MemberTab,
+} from './MemberViews';
+import {
+  LeaderAssessmentsView,
+  LeaderMoodInsightsView,
+  LeaderOverviewView,
+  TeamsManagementView,
+  type LeaderTab,
+} from './LeaderViews';
 import { ReportsAndFollowUpView } from './ReportsAndFollowUpView';
 import type {
   AssessmentCampaignRow,
@@ -14,6 +28,7 @@ import type {
   AssessmentResponseRow,
   AssessmentResultRow,
   AssessmentTemplateRow,
+  DirectoryMemberRow,
   FollowUpRow,
   InvitationRow,
   MoodEntryRow,
@@ -65,7 +80,7 @@ export function WorkspaceAppClient({
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [teams, setTeams] = useState<TeamRow[]>([]);
   const [teamMembers, setTeamMembers] = useState<TeamMemberRow[]>([]);
-  const [profilesMap, setProfilesMap] = useState<Record<string, ProfileRow>>({});
+  const [directoryMap, setDirectoryMap] = useState<Record<string, DirectoryMemberRow>>({});
   const [invitations, setInvitations] = useState<InvitationRow[]>([]);
   const [moodEntries, setMoodEntries] = useState<MoodEntryRow[]>([]);
   const [template, setTemplate] = useState<AssessmentTemplateRow | null>(null);
@@ -81,21 +96,53 @@ export function WorkspaceAppClient({
   const [periodDays, setPeriodDays] = useState<number>(14);
   const [insights, setInsights] = useState<TeamWellbeingInsights | null>(null);
   const [loadingInsights, setLoadingInsights] = useState<boolean>(false);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
 
   const [viewMode, setViewMode] = useState<'leader' | 'member'>('member');
   const [leaderTab, setLeaderTab] = useState<LeaderTab>('overview');
   const [memberTab, setMemberTab] = useState<MemberTab>('my-overview');
+  const [preselectedMood, setPreselectedMood] = useState<1 | 2 | 3 | 4 | 5 | null>(null);
   const [loadingWorkspace, setLoadingWorkspace] = useState<boolean>(true);
 
+  const wsLoadSeqRef = useRef(0);
+  const insightsLoadSeqRef = useRef(0);
+
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) || workspaces[0];
-  const myWsMembership = wsMemberships.find((m) => m.workspace_id === activeWorkspace?.id && m.user_id === userId);
-  const isLeaderInTeam = teamMembers.some((tm) => tm.workspace_id === activeWorkspace?.id && tm.user_id === userId && tm.role === 'leader');
-  const isLeader = myWsMembership?.role === 'owner' || myWsMembership?.role === 'leader' || isLeaderInTeam;
+  const myWsMembership = wsMemberships.find(
+    (m) => m.workspace_id === activeWorkspace?.id && m.user_id === userId
+  );
   const isWorkspaceOwner = myWsMembership?.role === 'owner';
+  const isWorkspaceLeader =
+    myWsMembership?.role === 'owner' || myWsMembership?.role === 'leader';
+
+  const managedTeams = useMemo(() => {
+    if (isWorkspaceLeader) return teams;
+    return teams.filter((t) =>
+      teamMembers.some(
+        (tm) => tm.workspace_id === activeWorkspace?.id && tm.team_id === t.id && tm.user_id === userId && tm.role === 'leader'
+      )
+    );
+  }, [isWorkspaceLeader, teams, teamMembers, activeWorkspace?.id, userId]);
+
+  const isLeader = isWorkspaceLeader || managedTeams.length > 0;
+
+  const effectiveTeamId = useMemo(() => {
+    if (isWorkspaceLeader) {
+      if (selectedTeamId && teams.some((t) => t.id === selectedTeamId)) return selectedTeamId;
+      return null;
+    }
+    if (selectedTeamId && managedTeams.some((t) => t.id === selectedTeamId)) {
+      return selectedTeamId;
+    }
+    return managedTeams[0]?.id ?? null;
+  }, [isWorkspaceLeader, selectedTeamId, teams, managedTeams]);
 
   const loadWorkspaceData = useCallback(async (wsId: string) => {
     if (!wsId) return;
+    const seq = ++wsLoadSeqRef.current;
     setLoadingWorkspace(true);
+    setWorkspaceError(null);
     try {
       const supabase = createClient();
       const [wsListRes, wsMemRes, profRes, teamsRes, tmRes, moodRes, tplRes, campRes, myResRes, inProgRes] = await Promise.all([
@@ -105,13 +152,33 @@ export function WorkspaceAppClient({
         supabase.from('teams').select('*').eq('workspace_id', wsId).eq('is_archived', false).order('created_at'),
         supabase.from('team_members').select('*').eq('workspace_id', wsId),
         supabase.from('mood_entries').select('*').eq('workspace_id', wsId).eq('user_id', userId).order('entry_date', { ascending: false }),
-        supabase.from('assessment_templates').select('*').eq('is_active', true).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+        supabase
+          .from('assessment_templates')
+          .select('*')
+          .eq('is_active', true)
+          .or(`workspace_id.is.null,workspace_id.eq.${wsId}`)
+          .order('workspace_id', { ascending: false, nullsFirst: false })
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
         supabase.from('assessment_campaigns').select('*').eq('workspace_id', wsId).order('created_at', { ascending: false }),
         supabase.from('assessment_results').select('*').eq('workspace_id', wsId).eq('user_id', userId).order('created_at', { ascending: false }),
         supabase.from('assessment_responses').select('*').eq('workspace_id', wsId).eq('user_id', userId).eq('status', 'in_progress').order('updated_at', { ascending: false }).limit(1).maybeSingle(),
       ]);
 
-      if (wsListRes.data) setWorkspaces(wsListRes.data as WorkspaceRow[]);
+      if (seq !== wsLoadSeqRef.current) return;
+
+      const latestWorkspaces = (wsListRes.data || []) as WorkspaceRow[];
+      if (latestWorkspaces.length === 0) {
+        router.replace('/onboarding');
+        return;
+      }
+      setWorkspaces(latestWorkspaces);
+      if (!latestWorkspaces.some((w) => w.id === wsId)) {
+        setActiveWorkspaceId(latestWorkspaces[0].id);
+        return;
+      }
+
       if (wsMemRes.data) setWsMemberships(wsMemRes.data as WorkspaceMemberRow[]);
       if (profRes.data) setProfile(profRes.data as ProfileRow);
       if (teamsRes.data) setTeams(teamsRes.data as TeamRow[]);
@@ -123,14 +190,25 @@ export function WorkspaceAppClient({
       const activeTpl = (tplRes.data as AssessmentTemplateRow) || null;
       setTemplate(activeTpl);
       if (activeTpl) {
-        const { data: qData } = await supabase.from('assessment_questions').select('*').eq('template_id', activeTpl.id).order('question_order', { ascending: true });
-        if (qData) setQuestions(qData as AssessmentQuestionRow[]);
+        const { data: qData } = await supabase
+          .from('assessment_questions')
+          .select('*')
+          .eq('template_id', activeTpl.id)
+          .order('question_order', { ascending: true });
+        if (seq !== wsLoadSeqRef.current) return;
+        setQuestions((qData as AssessmentQuestionRow[]) || []);
+      } else {
+        setQuestions([]);
       }
 
       const inProg = (inProgRes.data as AssessmentResponseRow) || null;
       setInProgressResponse(inProg);
       if (inProg) {
-        const { data: ansData } = await supabase.from('assessment_answers').select('question_id, answer_value').eq('response_id', inProg.id);
+        const { data: ansData } = await supabase
+          .from('assessment_answers')
+          .select('question_id, answer_value')
+          .eq('response_id', inProg.id);
+        if (seq !== wsLoadSeqRef.current) return;
         const map: Record<string, number> = {};
         for (const row of ansData || []) map[row.question_id] = row.answer_value;
         setDraftAnswers(map);
@@ -141,39 +219,83 @@ export function WorkspaceAppClient({
       const wsRole = (wsMemRes.data || []).find((m) => m.workspace_id === wsId)?.role;
       const teamLeader = (tmRes.data || []).some((tm) => tm.user_id === userId && tm.role === 'leader');
       if (wsRole === 'owner' || wsRole === 'leader' || teamLeader) {
-        const [invRes, repRes, fuRes, allProfsRes] = await Promise.all([
+        const [invRes, repRes, fuRes, dirRes] = await Promise.all([
           supabase.from('invitations').select('*').eq('workspace_id', wsId).order('created_at', { ascending: false }),
           supabase.from('team_reports').select('*').eq('workspace_id', wsId).order('created_at', { ascending: false }),
           supabase.from('follow_ups').select('*').eq('workspace_id', wsId).order('created_at', { ascending: false }),
-          supabase.from('profiles').select('*'),
+          supabase.rpc('get_workspace_directory', { p_workspace_id: wsId }),
         ]);
-        if (invRes.data) setInvitations(invRes.data as InvitationRow[]);
-        if (repRes.data) setReports(repRes.data as unknown as TeamReportRow[]);
-        if (fuRes.data) setFollowUps(fuRes.data as FollowUpRow[]);
-        if (allProfsRes.data) {
-          const pMap: Record<string, ProfileRow> = {};
-          for (const p of allProfsRes.data as ProfileRow[]) pMap[p.id] = p;
-          setProfilesMap(pMap);
-        }
+        if (seq !== wsLoadSeqRef.current) return;
+        setInvitations((invRes.data as InvitationRow[]) || []);
+        setReports((repRes.data as unknown as TeamReportRow[]) || []);
+        setFollowUps((fuRes.data as FollowUpRow[]) || []);
+        const dMap: Record<string, DirectoryMemberRow> = {};
+        for (const p of (dirRes.data as DirectoryMemberRow[]) || []) dMap[p.id] = p;
+        setDirectoryMap(dMap);
+      } else {
+        setInvitations([]);
+        setReports([]);
+        setFollowUps([]);
+        setDirectoryMap({});
+      }
+    } catch {
+      if (seq === wsLoadSeqRef.current) {
+        setWorkspaceError('ไม่สามารถโหลดข้อมูลพื้นที่ทำงานได้ กรุณาลองรีเฟรชหน้าใหม่อีกครั้ง');
       }
     } finally {
-      setLoadingWorkspace(false);
+      if (seq === wsLoadSeqRef.current) {
+        setLoadingWorkspace(false);
+      }
     }
-  }, [userId]);
+  }, [userId, router]);
 
-  useEffect(() => { setViewMode(isLeader ? 'leader' : 'member'); }, [activeWorkspaceId, isLeader]);
-  useEffect(() => { if (activeWorkspaceId) loadWorkspaceData(activeWorkspaceId); }, [activeWorkspaceId, loadWorkspaceData]);
+  useEffect(() => {
+    setViewMode(isLeader ? 'leader' : 'member');
+  }, [activeWorkspaceId, isLeader]);
+
+  useEffect(() => {
+    if (activeWorkspaceId) loadWorkspaceData(activeWorkspaceId);
+  }, [activeWorkspaceId, loadWorkspaceData]);
 
   const loadLeaderInsights = useCallback(async () => {
     if (!activeWorkspaceId || !isLeader) return;
+    if (!isWorkspaceLeader && !effectiveTeamId) {
+      setInsights(null);
+      setInsightsError(null);
+      return;
+    }
+    const seq = ++insightsLoadSeqRef.current;
     setLoadingInsights(true);
+    setInsightsError(null);
     try {
-      const { data } = await createClient().rpc('get_team_wellbeing_insights', { p_workspace_id: activeWorkspaceId, p_team_id: selectedTeamId, p_days: periodDays });
-      if (data) setInsights(data as unknown as TeamWellbeingInsights);
-    } finally { setLoadingInsights(false); }
-  }, [activeWorkspaceId, isLeader, selectedTeamId, periodDays]);
+      const { data, error } = await createClient().rpc('get_team_wellbeing_insights', {
+        p_workspace_id: activeWorkspaceId,
+        p_team_id: effectiveTeamId,
+        p_days: periodDays,
+      });
+      if (seq !== insightsLoadSeqRef.current) return;
+      if (error) {
+        setInsightsError(error.message || 'ไม่สามารถโหลดข้อมูลสรุปของทีมได้');
+        setInsights(null);
+      } else if (data) {
+        setInsights(data as unknown as TeamWellbeingInsights);
+      }
+    } catch {
+      if (seq === insightsLoadSeqRef.current) {
+        setInsightsError('เกิดข้อผิดพลาดในการเชื่อมต่อเพื่อโหลดข้อมูลสรุปของทีม');
+      }
+    } finally {
+      if (seq === insightsLoadSeqRef.current) {
+        setLoadingInsights(false);
+      }
+    }
+  }, [activeWorkspaceId, isLeader, isWorkspaceLeader, effectiveTeamId, periodDays]);
 
-  useEffect(() => { if (isLeader && activeWorkspaceId) loadLeaderInsights(); }, [isLeader, activeWorkspaceId, loadLeaderInsights]);
+  useEffect(() => {
+    if (isLeader && activeWorkspaceId && !loadingWorkspace) {
+      loadLeaderInsights();
+    }
+  }, [isLeader, activeWorkspaceId, loadingWorkspace, loadLeaderInsights]);
 
   async function handleSignOut() {
     await createClient().auth.signOut();
@@ -185,6 +307,9 @@ export function WorkspaceAppClient({
     if (nextWsId === '__NEW__') { router.push('/onboarding'); return; }
     setActiveWorkspaceId(nextWsId);
     setSelectedTeamId(null);
+    setInsights(null);
+    setInsightsError(null);
+    setPreselectedMood(null);
     if (typeof window !== 'undefined') window.localStorage.setItem('burningupp_active_workspace_id', nextWsId);
   }
 
@@ -209,7 +334,14 @@ export function WorkspaceAppClient({
   const showLeaderView = viewMode === 'leader' && isLeader;
   const activeNavItems = showLeaderView ? leaderNavItems : memberNavItems;
   const currentTabId = showLeaderView ? leaderTab : memberTab;
-  const handleSelectTab = (id: string) => (showLeaderView ? setLeaderTab(id as LeaderTab) : setMemberTab(id as MemberTab));
+  const handleSelectTab = (id: string) => {
+    if (showLeaderView) {
+      setLeaderTab(id as LeaderTab);
+    } else {
+      if (id !== 'checkin') setPreselectedMood(null);
+      setMemberTab(id as MemberTab);
+    }
+  };
 
   const refreshAll = async () => {
     await loadWorkspaceData(activeWorkspace.id);
@@ -273,6 +405,7 @@ export function WorkspaceAppClient({
       </header>
 
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 md:py-8">
+        {workspaceError && <StatusBanner type="error" message={workspaceError} className="mb-6" />}
         {loadingWorkspace || !profile ? (
           <div className="rounded-3xl border border-stone-200 bg-white p-14 text-center text-sm text-stone-500">
             <Loader2 className="mx-auto h-6 w-6 animate-spin text-teal-700 mb-2" />กำลังโหลดข้อมูลพื้นที่ทำงาน...
@@ -280,32 +413,150 @@ export function WorkspaceAppClient({
         ) : showLeaderView ? (
           <>
             {leaderTab === 'overview' && (
-              <LeaderOverviewView workspace={activeWorkspace} teams={teams} selectedTeamId={selectedTeamId} onSelectTeam={setSelectedTeamId} periodDays={periodDays} onSelectPeriod={setPeriodDays} insights={insights} loadingInsights={loadingInsights} onNavigate={setLeaderTab} />
+              <LeaderOverviewView
+                key={activeWorkspace.id}
+                workspace={activeWorkspace}
+                teams={managedTeams}
+                canViewAllTeams={isWorkspaceLeader}
+                selectedTeamId={effectiveTeamId}
+                onSelectTeam={setSelectedTeamId}
+                periodDays={periodDays}
+                onSelectPeriod={setPeriodDays}
+                insights={insights}
+                loadingInsights={loadingInsights}
+                insightsError={insightsError}
+                onNavigate={setLeaderTab}
+              />
             )}
             {leaderTab === 'teams' && (
-              <TeamsManagementView workspace={activeWorkspace} isWorkspaceOwner={isWorkspaceOwner} teams={teams} teamMembers={teamMembers} profilesMap={profilesMap} invitations={invitations} currentUserId={userId} onRefresh={refreshAll} />
+              <TeamsManagementView
+                key={activeWorkspace.id}
+                workspace={activeWorkspace}
+                isWorkspaceOwner={isWorkspaceOwner}
+                isWorkspaceLeader={isWorkspaceLeader}
+                teams={teams}
+                managedTeams={managedTeams}
+                teamMembers={teamMembers}
+                directoryMap={directoryMap}
+                invitations={invitations}
+                currentUserId={userId}
+                onRefresh={refreshAll}
+              />
             )}
             {leaderTab === 'mood-insights' && (
-              <LeaderMoodInsightsView teams={teams} selectedTeamId={selectedTeamId} onSelectTeam={setSelectedTeamId} periodDays={periodDays} onSelectPeriod={setPeriodDays} insights={insights} loadingInsights={loadingInsights} />
+              <LeaderMoodInsightsView
+                key={activeWorkspace.id}
+                teams={managedTeams}
+                canViewAllTeams={isWorkspaceLeader}
+                selectedTeamId={effectiveTeamId}
+                onSelectTeam={setSelectedTeamId}
+                periodDays={periodDays}
+                onSelectPeriod={setPeriodDays}
+                insights={insights}
+                loadingInsights={loadingInsights}
+                insightsError={insightsError}
+              />
             )}
             {leaderTab === 'leader-assessments' && (
-              <LeaderAssessmentsView workspace={activeWorkspace} teams={teams} selectedTeamId={selectedTeamId} onSelectTeam={setSelectedTeamId} periodDays={periodDays} onSelectPeriod={setPeriodDays} insights={insights} loadingInsights={loadingInsights} campaigns={campaigns} template={template} userId={userId} onRefresh={refreshAll} />
+              <LeaderAssessmentsView
+                key={activeWorkspace.id}
+                workspace={activeWorkspace}
+                teams={managedTeams}
+                canViewAllTeams={isWorkspaceLeader}
+                selectedTeamId={effectiveTeamId}
+                onSelectTeam={setSelectedTeamId}
+                periodDays={periodDays}
+                onSelectPeriod={setPeriodDays}
+                insights={insights}
+                loadingInsights={loadingInsights}
+                insightsError={insightsError}
+                campaigns={campaigns}
+                template={template}
+                userId={userId}
+                onRefresh={refreshAll}
+              />
             )}
             {leaderTab === 'reports' && (
-              <ReportsAndFollowUpView workspace={activeWorkspace} teams={teams} selectedTeamId={selectedTeamId} onSelectTeam={setSelectedTeamId} periodDays={periodDays} onSelectPeriod={setPeriodDays} insights={insights} loadingInsights={loadingInsights} reports={reports} followUps={followUps} userId={userId} onRefresh={async () => { await loadWorkspaceData(activeWorkspace.id); }} />
+              <ReportsAndFollowUpView
+                key={activeWorkspace.id}
+                workspace={activeWorkspace}
+                teams={managedTeams}
+                canViewAllTeams={isWorkspaceLeader}
+                selectedTeamId={effectiveTeamId}
+                onSelectTeam={setSelectedTeamId}
+                periodDays={periodDays}
+                onSelectPeriod={setPeriodDays}
+                insights={insights}
+                loadingInsights={loadingInsights}
+                insightsError={insightsError}
+                reports={reports}
+                followUps={followUps}
+                userId={userId}
+                onRefresh={async () => { await loadWorkspaceData(activeWorkspace.id); }}
+              />
             )}
           </>
         ) : (
           <>
             {memberTab === 'my-overview' && (
-              <MemberOverviewView profile={profile} workspace={activeWorkspace} myTeams={myTeams} moodEntries={moodEntries} campaigns={campaigns} template={template} myResults={myResults} inProgressResponse={inProgressResponse} onNavigate={setMemberTab} />
+              <MemberOverviewView
+                key={activeWorkspace.id}
+                profile={profile}
+                workspace={activeWorkspace}
+                myTeams={myTeams}
+                moodEntries={moodEntries}
+                campaigns={campaigns}
+                template={template}
+                myResults={myResults}
+                inProgressResponse={inProgressResponse}
+                onNavigate={setMemberTab}
+                onQuickSelectMood={(lvl) => {
+                  setPreselectedMood(lvl);
+                  setMemberTab('checkin');
+                }}
+              />
             )}
-            {memberTab === 'checkin' && <DailyCheckinView workspace={activeWorkspace} myTeams={myTeams} moodEntries={moodEntries} userId={userId} onSaved={refreshAll} />}
-            {memberTab === 'mood-history' && <MoodHistoryView moodEntries={moodEntries} onDeleted={refreshAll} />}
+            {memberTab === 'checkin' && (
+              <DailyCheckinView
+                key={activeWorkspace.id}
+                workspace={activeWorkspace}
+                myTeams={myTeams}
+                moodEntries={moodEntries}
+                userId={userId}
+                preselectedMood={preselectedMood}
+                onSaved={async () => {
+                  setPreselectedMood(null);
+                  await refreshAll();
+                }}
+              />
+            )}
+            {memberTab === 'mood-history' && (
+              <MoodHistoryView key={activeWorkspace.id} moodEntries={moodEntries} onDeleted={refreshAll} />
+            )}
             {memberTab === 'member-assessments' && (
-              <MemberAssessmentsView workspace={activeWorkspace} myTeams={myTeams} template={template} questions={questions} campaigns={campaigns} inProgressResponse={inProgressResponse} initialDraftAnswers={draftAnswers} myResults={myResults} userId={userId} onSubmitted={refreshAll} />
+              <MemberAssessmentsView
+                key={activeWorkspace.id}
+                workspace={activeWorkspace}
+                myTeams={myTeams}
+                template={template}
+                questions={questions}
+                campaigns={campaigns}
+                inProgressResponse={inProgressResponse}
+                initialDraftAnswers={draftAnswers}
+                myResults={myResults}
+                userId={userId}
+                onSubmitted={refreshAll}
+              />
             )}
-            {memberTab === 'profile' && <MemberProfileView profile={profile} workspace={activeWorkspace} myTeams={myTeams} onUpdated={refreshAll} />}
+            {memberTab === 'profile' && (
+              <MemberProfileView
+                key={activeWorkspace.id}
+                profile={profile}
+                workspace={activeWorkspace}
+                myTeams={myTeams}
+                onUpdated={refreshAll}
+              />
+            )}
           </>
         )}
       </main>

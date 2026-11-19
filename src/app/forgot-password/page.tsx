@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
+import { forgotPasswordSchema } from '@/lib/validation';
 import { Logo } from '@/components/ui/Logo';
 import { StatusBanner, UI_BTN_PRIMARY, UI_CARD, UI_INPUT_LG, UI_LABEL_LG } from '@/components/ui/Surface';
 import { ArrowLeft, CheckCircle2, Loader2 } from 'lucide-react';
@@ -16,13 +17,24 @@ export default function ForgotPasswordPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const trimmed = email.trim().toLowerCase();
-    if (!trimmed || !trimmed.includes('@')) { setError('กรุณากรอกอีเมลให้ถูกต้อง'); return; }
+    const parsed = forgotPasswordSchema.safeParse({ email });
+    if (!parsed.success) { setError(parsed.error.issues[0]?.message || 'กรุณากรอกอีเมลให้ถูกต้อง'); return; }
     setLoading(true);
     try {
-      const { error: resetError } = await createClient().auth.resetPasswordForEmail(trimmed, { redirectTo: `${window.location.origin}/login` });
-      if (resetError) setError(resetError.message);
-      else setSent(true);
+      const { error: resetError } = await createClient().auth.resetPasswordForEmail(parsed.data.email, {
+        redirectTo: `${window.location.origin}/auth/callback?next=/reset-password`,
+      });
+      if (resetError) {
+        const lower = resetError.message.toLowerCase();
+        if (lower.includes('rate limit') || lower.includes('too many')) {
+          setError('มีการขอรีเซ็ตรหัสผ่านถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง');
+        } else {
+          // Do not expose account existence details
+          setSent(true);
+        }
+      } else {
+        setSent(true);
+      }
     } catch { setError('ไม่สามารถส่งคำขอรีเซ็ตรหัสผ่านได้ในขณะนี้'); } finally { setLoading(false); }
   }
 
@@ -39,7 +51,7 @@ export default function ForgotPasswordPage() {
             <div className="space-y-4 text-center py-2">
               <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><CheckCircle2 className="h-6 w-6" /></div>
               <h2 className="text-base font-bold text-stone-900">ส่งลิงก์กู้คืนรหัสผ่านเรียบร้อยแล้ว</h2>
-              <p className="text-sm text-stone-600 leading-relaxed">หากอีเมล <strong>{email}</strong> มีอยู่ในระบบ คุณจะได้รับลิงก์สำหรับตั้งรหัสผ่านใหม่ทางอีเมลของคุณ</p>
+              <p className="text-sm text-stone-600 leading-relaxed">หากอีเมล <strong>{email.trim().toLowerCase()}</strong> มีอยู่ในระบบ คุณจะได้รับลิงก์สำหรับตั้งรหัสผ่านใหม่ทางอีเมลของคุณ</p>
               <Link href="/login" className={`mt-4 ${UI_BTN_PRIMARY} px-5`}>กลับไปหน้าเข้าสู่ระบบ</Link>
             </div>
           ) : (
@@ -47,7 +59,7 @@ export default function ForgotPasswordPage() {
               {error && <StatusBanner type="error" message={error} />}
               <div>
                 <label htmlFor="email" className={UI_LABEL_LG}>อีเมลของคุณ</label>
-                <input id="email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className={UI_INPUT_LG} />
+                <input id="email" type="email" required maxLength={254} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className={UI_INPUT_LG} />
               </div>
               <button type="submit" disabled={loading} className={`w-full ${UI_BTN_PRIMARY} py-3`}>
                 {loading ? <><Loader2 className="h-4 w-4 animate-spin" />กำลังส่งข้อมูล...</> : 'ส่งลิงก์ตั้งรหัสผ่านใหม่'}

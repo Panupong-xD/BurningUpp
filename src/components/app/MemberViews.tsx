@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import {
   ASSESSMENT_BANDS,
@@ -10,6 +10,7 @@ import {
   MOOD_LEVELS,
   MOOD_LEVEL_MAP,
 } from '@/lib/constants';
+import { moodCheckinSchema, profileUpdateSchema } from '@/lib/validation';
 import { formatThaiDate, formatThaiShortDate, getTodayIsoDate } from '@/lib/wellbeing';
 import { MoodIllustration } from '@/components/ui/MoodIcon';
 import { StatusBanner, UI_BTN_PRIMARY, UI_BTN_SECONDARY, UI_CARD, UI_INPUT, UI_SUBCARD } from '@/components/ui/Surface';
@@ -42,6 +43,18 @@ import {
 
 export type MemberTab = 'my-overview' | 'checkin' | 'mood-history' | 'member-assessments' | 'profile';
 
+function findRelevantActiveCampaign(
+  campaigns: AssessmentCampaignRow[],
+  myTeams: TeamRow[]
+): AssessmentCampaignRow | null {
+  const myTeamIds = new Set(myTeams.map((t) => t.id));
+  return (
+    campaigns.find(
+      (c) => c.status === 'active' && (c.team_id === null || myTeamIds.has(c.team_id))
+    ) || null
+  );
+}
+
 export function MemberOverviewView({
   profile,
   workspace,
@@ -52,6 +65,7 @@ export function MemberOverviewView({
   myResults,
   inProgressResponse,
   onNavigate,
+  onQuickSelectMood,
 }: {
   profile: ProfileRow;
   workspace: WorkspaceRow;
@@ -62,6 +76,7 @@ export function MemberOverviewView({
   myResults: AssessmentResultRow[];
   inProgressResponse: AssessmentResponseRow | null;
   onNavigate: (tab: MemberTab) => void;
+  onQuickSelectMood?: (level: 1 | 2 | 3 | 4 | 5) => void;
 }) {
   const todayIso = getTodayIsoDate();
   const todayEntry = useMemo(() => moodEntries.find((m) => m.entry_date === todayIso) || null, [moodEntries, todayIso]);
@@ -73,7 +88,10 @@ export function MemberOverviewView({
   }, [recent7Entries]);
 
   const latestResult = myResults[0] || null;
-  const activeCampaign = campaigns.find((c) => c.status === 'active') || campaigns[0] || null;
+  const activeCampaign = useMemo(
+    () => findRelevantActiveCampaign(campaigns, myTeams),
+    [campaigns, myTeams]
+  );
 
   return (
     <div className="space-y-6">
@@ -129,7 +147,7 @@ export function MemberOverviewView({
                 <button
                   key={m.level}
                   type="button"
-                  onClick={() => onNavigate('checkin')}
+                  onClick={() => (onQuickSelectMood ? onQuickSelectMood(m.level) : onNavigate('checkin'))}
                   className={`flex flex-col items-center justify-center gap-2 rounded-2xl border p-3 transition hover:shadow-xs ${m.borderClass} bg-[#FAF8F5]/60 hover:bg-white`}
                 >
                   <MoodIllustration level={m.level} className="h-10 w-10 sm:h-11 sm:w-11" />
@@ -179,12 +197,12 @@ export function MemberOverviewView({
                   <span className="text-2xl font-bold text-stone-900">{avgRecentMood.toFixed(1)} / 5</span>
                   <span className="text-sm text-stone-600">ค่าเฉลี่ย {recent7Entries.length} ครั้งล่าสุด ({MOOD_LEVEL_MAP[Math.round(avgRecentMood)]?.label})</span>
                 </div>
-                <div className="flex items-center gap-1.5 pt-1">
+                <div className="flex items-center gap-1.5 pt-1 overflow-x-auto">
                   {recent7Entries.slice().reverse().map((item) => (
                     <div
                       key={item.id}
                       title={`${item.entry_date}: ${MOOD_LEVEL_MAP[item.mood_level]?.label}`}
-                      className="flex flex-col items-center gap-1 rounded-xl border border-stone-200/70 bg-[#FAF8F5] px-2 py-1.5"
+                      className="flex flex-col items-center gap-1 rounded-xl border border-stone-200/70 bg-[#FAF8F5] px-2 py-1.5 shrink-0"
                     >
                       <MoodIllustration level={item.mood_level} className="h-6 w-6" />
                       <span className="text-[10px] text-stone-500">{formatThaiShortDate(item.entry_date)}</span>
@@ -219,18 +237,22 @@ export function DailyCheckinView({
   myTeams,
   moodEntries,
   userId,
+  preselectedMood = null,
   onSaved,
 }: {
   workspace: WorkspaceRow;
   myTeams: TeamRow[];
   moodEntries: MoodEntryRow[];
   userId: string;
+  preselectedMood?: 1 | 2 | 3 | 4 | 5 | null;
   onSaved: () => Promise<void>;
 }) {
   const todayIso = getTodayIsoDate();
   const existingToday = useMemo(() => moodEntries.find((m) => m.entry_date === todayIso) || null, [moodEntries, todayIso]);
 
-  const [selectedLevel, setSelectedLevel] = useState<1 | 2 | 3 | 4 | 5 | null>(existingToday ? existingToday.mood_level : null);
+  const [selectedLevel, setSelectedLevel] = useState<1 | 2 | 3 | 4 | 5 | null>(
+    existingToday ? existingToday.mood_level : preselectedMood
+  );
   const [selectedFactors, setSelectedFactors] = useState<string[]>(existingToday ? existingToday.factors : []);
   const [privateNote, setPrivateNote] = useState<string>(existingToday ? existingToday.private_note : '');
   const [showOptionalDetails, setShowOptionalDetails] = useState<boolean>(
@@ -240,6 +262,21 @@ export function DailyCheckinView({
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (existingToday) {
+      setSelectedLevel(existingToday.mood_level);
+      setSelectedFactors(existingToday.factors);
+      setPrivateNote(existingToday.private_note);
+      if (existingToday.factors.length > 0 || existingToday.private_note.trim().length > 0) {
+        setShowOptionalDetails(true);
+      }
+    } else {
+      setSelectedLevel(preselectedMood);
+      setSelectedFactors([]);
+      setPrivateNote('');
+    }
+  }, [existingToday, preselectedMood]);
+
   function toggleFactor(key: string) {
     setSelectedFactors((prev) => (prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key]));
   }
@@ -248,12 +285,32 @@ export function DailyCheckinView({
     e.preventDefault();
     setError(null); setSuccessMsg(null);
     if (!selectedLevel) { setError('กรุณาเลือกระดับความรู้สึกของคุณวันนี้'); return; }
+
+    const parsed = moodCheckinSchema.safeParse({
+      workspaceId: workspace.id,
+      teamId: myTeams[0]?.id || null,
+      entryDate: todayIso,
+      moodLevel: selectedLevel,
+      factors: selectedFactors,
+      privateNote: privateNote.trim(),
+    });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message || 'ข้อมูลการเช็กอินไม่ถูกต้อง');
+      return;
+    }
+
     setSaving(true);
     try {
       const { error: upsertError } = await createClient().from('mood_entries').upsert(
         {
-          workspace_id: workspace.id, team_id: myTeams[0]?.id || null, user_id: userId, entry_date: todayIso,
-          mood_level: selectedLevel, factors: selectedFactors, private_note: privateNote.trim(), updated_at: new Date().toISOString(),
+          workspace_id: parsed.data.workspaceId,
+          team_id: parsed.data.teamId ?? null,
+          user_id: userId,
+          entry_date: parsed.data.entryDate,
+          mood_level: parsed.data.moodLevel,
+          factors: parsed.data.factors,
+          private_note: parsed.data.privateNote,
+          updated_at: new Date().toISOString(),
         },
         { onConflict: 'workspace_id,user_id,entry_date' }
       );
@@ -335,11 +392,12 @@ export function DailyCheckinView({
                 <div>
                   <div className="flex items-center justify-between">
                     <label htmlFor="privateNote" className="block text-xs font-semibold text-stone-700">บันทึกส่วนตัว (ไม่บังคับ)</label>
-                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-teal-700"><Lock className="h-3 w-3" />เห็นเฉพาะคุณเท่านั้น</span>
+                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-teal-700"><Lock className="h-3 w-3" />เห็นเฉพาะคุณเท่านั้น ({privateNote.length}/2000)</span>
                   </div>
                   <textarea
                     id="privateNote"
                     rows={3}
+                    maxLength={2000}
                     value={privateNote}
                     onChange={(e) => setPrivateNote(e.target.value)}
                     placeholder="จดบันทึกสั้นๆ สำหรับทบทวนตัวเอง (หัวหน้าทีมและคนอื่นไม่สามารถอ่านข้อความนี้ได้)"
@@ -366,6 +424,7 @@ export function DailyCheckinView({
 export function MoodHistoryView({ moodEntries, onDeleted }: { moodEntries: MoodEntryRow[]; onDeleted: () => Promise<void> }) {
   const [range, setRange] = useState<'7d' | '30d'>('7d');
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const daysCount = range === '7d' ? 7 : 30;
 
   const calendarDays = useMemo(() => {
@@ -388,8 +447,20 @@ export function MoodHistoryView({ moodEntries, onDeleted }: { moodEntries: MoodE
   }, [recordedDays]);
 
   async function handleDeleteEntry(id: string) {
+    setError(null);
     setDeletingId(id);
-    try { await createClient().from('mood_entries').delete().eq('id', id); await onDeleted(); } finally { setDeletingId(null); }
+    try {
+      const { error: deleteErr } = await createClient().from('mood_entries').delete().eq('id', id);
+      if (deleteErr) {
+        setError(deleteErr.message || 'ไม่สามารถลบบันทึกอารมณ์นี้ได้');
+        return;
+      }
+      await onDeleted();
+    } catch {
+      setError('เกิดข้อผิดพลาดในการลบบันทึกอารมณ์');
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   return (
@@ -412,6 +483,8 @@ export function MoodHistoryView({ moodEntries, onDeleted }: { moodEntries: MoodE
           ))}
         </div>
       </div>
+
+      {error && <StatusBanner type="error" message={error} />}
 
       <div className={`${UI_CARD} space-y-6`}>
         <div className="grid gap-4 sm:grid-cols-3">
@@ -535,60 +608,146 @@ export function MemberAssessmentsView({
 }) {
   const [isTaking, setIsTaking] = useState(false);
   const [currentIdx, setCurrentIdx] = useState<number>(() =>
-    inProgressResponse && inProgressResponse.current_step > 1 ? Math.min(questions.length - 1, inProgressResponse.current_step - 1) : 0
+    inProgressResponse && inProgressResponse.current_step > 1
+      ? Math.min(Math.max(0, questions.length - 1), inProgressResponse.current_step - 1)
+      : 0
   );
   const [answers, setAnswers] = useState<Record<string, number>>(initialDraftAnswers || {});
   const [responseId, setResponseId] = useState<string | null>(inProgressResponse?.id || null);
+  const responseIdRef = useRef<string | null>(inProgressResponse?.id || null);
+  const creatingRespPromiseRef = useRef<Promise<string | null> | null>(null);
   const [savingDraft, setSavingDraft] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justSubmittedResult, setJustSubmittedResult] = useState<AssessmentResultRow | null>(null);
 
-  const activeCampaign = campaigns.find((c) => c.status === 'active') || campaigns[0] || null;
+  useEffect(() => {
+    const nextId = inProgressResponse?.id || null;
+    setResponseId(nextId);
+    responseIdRef.current = nextId;
+    setAnswers(initialDraftAnswers || {});
+    setCurrentIdx(
+      inProgressResponse && inProgressResponse.current_step > 1
+        ? Math.min(Math.max(0, questions.length - 1), inProgressResponse.current_step - 1)
+        : 0
+    );
+  }, [inProgressResponse, initialDraftAnswers, questions.length]);
+
+  const activeCampaign = useMemo(
+    () => findRelevantActiveCampaign(campaigns, myTeams),
+    [campaigns, myTeams]
+  );
   const currentQuestion = questions[currentIdx] || null;
   const answeredCount = Object.keys(answers).length;
 
+  async function ensureDraftResponseId(stepNumber: number): Promise<string | null> {
+    if (responseIdRef.current) return responseIdRef.current;
+    if (creatingRespPromiseRef.current) return creatingRespPromiseRef.current;
+    if (!template) return null;
+
+    const promise = (async () => {
+      const supabase = createClient();
+      const { data: createdResp, error: createErr } = await supabase
+        .from('assessment_responses')
+        .insert({
+          workspace_id: workspace.id,
+          team_id: myTeams[0]?.id || null,
+          campaign_id: activeCampaign?.id || null,
+          template_id: template.id,
+          user_id: userId,
+          status: 'in_progress',
+          current_step: stepNumber,
+        })
+        .select('id')
+        .single();
+      if (createErr || !createdResp?.id) {
+        setError('ไม่สามารถบันทึกร่างอัตโนมัติได้ แต่คุณยังสามารถทำต่อและกดส่งคำตอบได้');
+        return null;
+      }
+      responseIdRef.current = createdResp.id;
+      setResponseId(createdResp.id);
+      return createdResp.id;
+    })();
+
+    creatingRespPromiseRef.current = promise;
+    try {
+      return await promise;
+    } finally {
+      creatingRespPromiseRef.current = null;
+    }
+  }
+
   async function handleSelectOption(questionId: string, val: number) {
     setError(null);
-    setAnswers({ ...answers, [questionId]: val });
+    setAnswers((prev) => ({ ...prev, [questionId]: val }));
     if (!template) return;
     setSavingDraft(true);
     try {
       const supabase = createClient();
-      let currentRespId = responseId;
-      if (!currentRespId) {
-        const { data: createdResp } = await supabase.from('assessment_responses').insert({
-          workspace_id: workspace.id, team_id: myTeams[0]?.id || null, campaign_id: activeCampaign?.id || null,
-          template_id: template.id, user_id: userId, status: 'in_progress', current_step: currentIdx + 1,
-        }).select('id').single();
-        if (createdResp?.id) { currentRespId = createdResp.id; setResponseId(createdResp.id); }
-      } else {
-        await supabase.from('assessment_responses').update({ current_step: currentIdx + 1, updated_at: new Date().toISOString() }).eq('id', currentRespId);
-      }
+      const currentRespId = await ensureDraftResponseId(currentIdx + 1);
       if (currentRespId) {
-        await supabase.from('assessment_answers').upsert(
-          { response_id: currentRespId, question_id: questionId, user_id: userId, answer_value: val, updated_at: new Date().toISOString() },
-          { onConflict: 'response_id,question_id' }
-        );
+        const [updRes, ansRes] = await Promise.all([
+          supabase
+            .from('assessment_responses')
+            .update({ current_step: currentIdx + 1, updated_at: new Date().toISOString() })
+            .eq('id', currentRespId),
+          supabase
+            .from('assessment_answers')
+            .upsert(
+              {
+                response_id: currentRespId,
+                question_id: questionId,
+                user_id: userId,
+                answer_value: val,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'response_id,question_id' }
+            ),
+        ]);
+        if (updRes.error || ansRes.error) {
+          setError('ไม่สามารถบันทึกร่างอัตโนมัติได้ชั่วคราว กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต');
+        }
       }
-    } finally { setSavingDraft(false); }
+    } finally {
+      setSavingDraft(false);
+    }
   }
 
   async function handleSubmitAssessment() {
     if (!template) return;
     setError(null);
-    if (Object.keys(answers).length < questions.length) { setError('กรุณาตอบคำถามให้ครบทุกข้อก่อนส่งแบบสำรวจ'); return; }
+    if (Object.keys(answers).length < questions.length) {
+      setError('กรุณาตอบคำถามให้ครบทุกข้อก่อนส่งแบบสำรวจ');
+      return;
+    }
     setSubmitting(true);
     try {
       const { data, error: rpcError } = await createClient().rpc('submit_burnout_assessment', {
-        p_workspace_id: workspace.id, p_team_id: myTeams[0]?.id || null, p_campaign_id: activeCampaign?.id || null,
-        p_template_id: template.id, p_answers: answers, p_response_id: responseId,
+        p_workspace_id: workspace.id,
+        p_team_id: myTeams[0]?.id || null,
+        p_campaign_id: activeCampaign?.id || null,
+        p_template_id: template.id,
+        p_answers: answers,
+        p_response_id: responseIdRef.current,
       });
-      if (rpcError || !data) { setError(rpcError?.message || 'ไม่สามารถส่งแบบสำรวจได้'); setSubmitting(false); return; }
+      if (rpcError || !data) {
+        setError(rpcError?.message || 'ไม่สามารถส่งแบบสำรวจได้');
+        setSubmitting(false);
+        return;
+      }
+      // Reset draft state cleanly so future assessments start fresh
+      responseIdRef.current = null;
+      setResponseId(null);
+      setAnswers({});
+      setCurrentIdx(0);
       setJustSubmittedResult(data as AssessmentResultRow);
       setIsTaking(false);
       await onSubmitted();
-    } catch { setError('เกิดข้อผิดพลาดในการส่งแบบสำรวจ'); } finally { setSubmitting(false); }
+    } catch {
+      setError('เกิดข้อผิดพลาดในการส่งแบบสำรวจ');
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   if (!template || questions.length === 0) {
@@ -694,8 +853,8 @@ export function MemberAssessmentsView({
             <Lock className="h-4 w-4 text-teal-700 shrink-0" />
             <span>หัวหน้าทีมจะเห็นเฉพาะค่าเฉลี่ยรวมของทีมเมื่อมีผู้ตอบครบ 5 คนขึ้นไปเท่านั้น</span>
           </div>
-          <button type="button" onClick={() => setIsTaking(true)} className={`${UI_BTN_PRIMARY} rounded-2xl px-6 py-3 shrink-0`}>
-            {inProgressResponse && answeredCount > 0 ? `ทำแบบสำรวจต่อ (ตอบแล้ว ${answeredCount}/${questions.length} ข้อ)` : 'เริ่มทำแบบสำรวจ'}
+          <button type="button" onClick={() => { setError(null); setIsTaking(true); }} className={`${UI_BTN_PRIMARY} rounded-2xl px-6 py-3 shrink-0`}>
+            {responseId && answeredCount > 0 ? `ทำแบบสำรวจต่อ (ตอบแล้ว ${answeredCount}/${questions.length} ข้อ)` : 'เริ่มทำแบบสำรวจ'}
             <ArrowRight className="h-4 w-4" />
           </button>
         </div>
@@ -762,19 +921,58 @@ export function MemberProfileView({
   const [consentMoodSharing, setConsentMoodSharing] = useState(profile.consent_mood_sharing);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setFullName(profile.full_name);
+    setConsentMoodSharing(profile.consent_mood_sharing);
+  }, [profile.full_name, profile.consent_mood_sharing]);
 
   async function handleSaveProfile(e: React.FormEvent) {
     e.preventDefault();
     setSavedMsg(null);
-    if (!fullName.trim()) return;
+    setError(null);
+
+    const parsed = profileUpdateSchema.safeParse({ fullName, consentMoodSharing });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message || 'กรุณาตรวจสอบข้อมูลให้ถูกต้อง');
+      return;
+    }
+
     setSaving(true);
     try {
       const supabase = createClient();
-      await supabase.from('profiles').update({ full_name: fullName.trim(), consent_mood_sharing: consentMoodSharing, updated_at: new Date().toISOString() }).eq('id', profile.id);
-      await supabase.from('consent_records').insert({ user_id: profile.id, workspace_id: workspace.id, consent_type: 'mood_aggregate_sharing', granted: consentMoodSharing });
+      const { error: profErr } = await supabase
+        .from('profiles')
+        .update({
+          full_name: parsed.data.fullName,
+          consent_mood_sharing: parsed.data.consentMoodSharing,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', profile.id);
+      if (profErr) {
+        setError(profErr.message || 'ไม่สามารถบันทึกโปรไฟล์ได้');
+        return;
+      }
+
+      const { error: consentErr } = await supabase.from('consent_records').insert({
+        user_id: profile.id,
+        workspace_id: workspace.id,
+        consent_type: 'mood_aggregate_sharing',
+        granted: parsed.data.consentMoodSharing,
+      });
+      if (consentErr) {
+        setError(consentErr.message || 'บันทึกโปรไฟล์แล้ว แต่ไม่สามารถบันทึกประวัติความยินยอมได้');
+        return;
+      }
+
       setSavedMsg('บันทึกการตั้งค่าโปรไฟล์และความเป็นส่วนตัวเรียบร้อยแล้ว');
       await onUpdated();
-    } finally { setSaving(false); }
+    } catch {
+      setError('เกิดข้อผิดพลาดในการเชื่อมต่อระบบ กรุณาลองใหม่อีกครั้ง');
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -784,6 +982,7 @@ export function MemberProfileView({
           <h1 className="text-2xl font-bold text-stone-900">โปรไฟล์และการตั้งค่าความเป็นส่วนตัว</h1>
           <p className="mt-1 text-sm text-stone-600">จัดการข้อมูลผู้ใช้งานและการให้ความยินยอมในการคำนวณข้อมูลภาพรวมของทีม</p>
         </div>
+        {error && <StatusBanner type="error" message={error} />}
         {savedMsg && <StatusBanner type="success" message={savedMsg} />}
         <form onSubmit={handleSaveProfile} className="space-y-5">
           <div>
@@ -792,7 +991,7 @@ export function MemberProfileView({
           </div>
           <div>
             <label htmlFor="profileName" className="block text-sm font-medium text-stone-700">ชื่อ-นามสกุล หรือชื่อที่ใช้แสดง</label>
-            <input id="profileName" type="text" required value={fullName} onChange={(e) => setFullName(e.target.value)} className={`${UI_INPUT} mt-1.5 py-2.5`} />
+            <input id="profileName" type="text" required maxLength={100} value={fullName} onChange={(e) => setFullName(e.target.value)} className={`${UI_INPUT} mt-1.5 py-2.5`} />
           </div>
           <div className={`${UI_SUBCARD} p-4 space-y-3`}>
             <div className="flex items-start justify-between gap-4">

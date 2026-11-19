@@ -246,29 +246,45 @@ export function buildTeamObservations(
   return items;
 }
 
+function parseDateSafe(dateStr: string): Date | null {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    // Anchor date-only strings to noon Bangkok time to avoid off-by-one UTC shifts
+    const d = new Date(`${dateStr}T12:00:00+07:00`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(dateStr);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 export function formatThaiDate(dateStr: string | null | undefined): string {
   if (!dateStr) return '-';
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return dateStr;
+  const d = parseDateSafe(dateStr);
+  if (!d) return dateStr;
   return d.toLocaleDateString('th-TH', {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
+    timeZone: 'Asia/Bangkok',
   });
 }
 
 export function formatThaiShortDate(dateStr: string): string {
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return dateStr;
+  const d = parseDateSafe(dateStr);
+  if (!d) return dateStr;
   return d.toLocaleDateString('th-TH', {
     day: 'numeric',
     month: 'short',
+    timeZone: 'Asia/Bangkok',
   });
 }
 
-export function getTodayIsoDate(): string {
+export function getBangkokIsoDateOffset(daysOffset: number = 0): string {
   const now = new Date();
   const offsetMs = 7 * 60 * 60 * 1000; // Asia/Bangkok UTC+7
-  const bangkok = new Date(now.getTime() + offsetMs);
+  const bangkok = new Date(now.getTime() + offsetMs + daysOffset * 86400000);
   return bangkok.toISOString().slice(0, 10);
+}
+
+export function getTodayIsoDate(): string {
+  return getBangkokIsoDateOffset(0);
 }

@@ -2,6 +2,23 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import { getSupabaseConfig } from './client';
 
+function sanitizeInviteParam(raw: string | null): string | null {
+  if (!raw) return null;
+  const cleaned = raw.trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+function redirectWithCookies(
+  url: URL,
+  sourceResponse: NextResponse
+): NextResponse {
+  const redirectResponse = NextResponse.redirect(url);
+  sourceResponse.cookies.getAll().forEach((cookie) => {
+    redirectResponse.cookies.set(cookie);
+  });
+  return redirectResponse;
+}
+
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
@@ -40,26 +57,34 @@ export async function updateSession(request: NextRequest) {
     pathname === '/register' ||
     pathname === '/forgot-password';
 
+  if (isProtectedPath || pathname.startsWith('/reset-password') || pathname.startsWith('/join')) {
+    supabaseResponse.headers.set('Cache-Control', 'no-store, max-age=0');
+  }
+
+  const inviteCode = sanitizeInviteParam(
+    request.nextUrl.searchParams.get('invite')
+  );
+
   if (!user && isProtectedPath) {
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = '/login';
-    const inviteCode = request.nextUrl.searchParams.get('invite');
+    redirectUrl.search = '';
     if (inviteCode) {
       redirectUrl.searchParams.set('invite', inviteCode);
     }
-    return NextResponse.redirect(redirectUrl);
+    return redirectWithCookies(redirectUrl, supabaseResponse);
   }
 
   if (user && isAuthPath) {
     const redirectUrl = request.nextUrl.clone();
-    const inviteCode = request.nextUrl.searchParams.get('invite');
+    redirectUrl.search = '';
     if (inviteCode) {
       redirectUrl.pathname = '/onboarding';
       redirectUrl.searchParams.set('invite', inviteCode);
     } else {
       redirectUrl.pathname = '/app';
     }
-    return NextResponse.redirect(redirectUrl);
+    return redirectWithCookies(redirectUrl, supabaseResponse);
   }
 
   return supabaseResponse;

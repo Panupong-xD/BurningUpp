@@ -68,6 +68,14 @@ export interface ProfileRow {
   updated_at: string;
 }
 
+export interface DirectoryMemberRow {
+  id: string;
+  full_name: string;
+  email: string;
+  avatar_url: string | null;
+  workspace_role: 'owner' | 'leader' | 'member';
+}
+
 export interface WorkspaceRow {
   id: string;
   name: string;

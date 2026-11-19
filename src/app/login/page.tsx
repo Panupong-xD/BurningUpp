@@ -4,17 +4,21 @@ import React, { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
-import { loginSchema } from '@/lib/validation';
+import { extractInviteToken, loginSchema } from '@/lib/validation';
 import { Logo } from '@/components/ui/Logo';
 import { StatusBanner, UI_BTN_PRIMARY, UI_CARD, UI_INPUT_LG, UI_LABEL_LG } from '@/components/ui/Surface';
 import { ArrowRight, Loader2, Lock } from 'lucide-react';
 
 function LoginForm() {
   const router = useRouter();
-  const inviteCode = useSearchParams().get('invite') || '';
+  const searchParams = useSearchParams();
+  const inviteCode = extractInviteToken(searchParams.get('invite') || '');
+  const callbackFailed = searchParams.get('error') === 'auth_callback_failed';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(
+    callbackFailed ? 'ลิงก์ยืนยันตัวตนไม่ถูกต้องหรือหมดอายุแล้ว กรุณาลองใหม่อีกครั้ง' : null
+  );
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -46,14 +50,14 @@ function LoginForm() {
           <form onSubmit={handleSubmit} className="space-y-4" noValidate>
             <div>
               <label htmlFor="email" className={UI_LABEL_LG}>อีเมล</label>
-              <input id="email" type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className={UI_INPUT_LG} />
+              <input id="email" type="email" autoComplete="email" required maxLength={254} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className={UI_INPUT_LG} />
             </div>
             <div>
               <div className="flex items-center justify-between">
                 <label htmlFor="password" className={UI_LABEL_LG}>รหัสผ่าน</label>
                 <Link href="/forgot-password" className="text-xs font-medium text-teal-700 hover:underline">ลืมรหัสผ่าน?</Link>
               </div>
-              <input id="password" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className={UI_INPUT_LG} />
+              <input id="password" type="password" autoComplete="current-password" required maxLength={72} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className={UI_INPUT_LG} />
             </div>
             <button type="submit" disabled={loading} className={`mt-2 w-full ${UI_BTN_PRIMARY} py-3`}>
               {loading ? <><Loader2 className="h-4 w-4 animate-spin" />กำลังเข้าสู่ระบบ...</> : <>เข้าสู่ระบบ<ArrowRight className="h-4 w-4" /></>}

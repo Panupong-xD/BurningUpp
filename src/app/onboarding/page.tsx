@@ -4,7 +4,7 @@ import React, { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
-import { createWorkspaceSchema, joinInvitationSchema } from '@/lib/validation';
+import { createWorkspaceSchema, extractInviteToken, joinInvitationSchema } from '@/lib/validation';
 import { Logo } from '@/components/ui/Logo';
 import { StatusBanner, UI_BTN_PRIMARY, UI_CARD, UI_INPUT, UI_SUBCARD } from '@/components/ui/Surface';
 import { ArrowLeft, ArrowRight, Building2, Check, CheckCircle2, Copy, Loader2, PlusCircle, Ticket, Users } from 'lucide-react';
@@ -20,7 +20,7 @@ interface CreatedWorkspaceResult {
 function OnboardingContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const initialInvite = searchParams.get('invite') || '';
+  const initialInvite = extractInviteToken(searchParams.get('invite') || '');
   const initialMode = searchParams.get('mode');
 
   const [mode, setMode] = useState<'choose' | 'create' | 'join' | 'created'>(
@@ -55,8 +55,11 @@ function OnboardingContent() {
   }, []);
 
   const handlePreviewInvite = useCallback(async (tokenToPreview: string) => {
-    const clean = tokenToPreview.trim().toUpperCase();
-    if (clean.length < 6) return;
+    const clean = extractInviteToken(tokenToPreview);
+    if (clean.length < 6) {
+      setPreviewData(null);
+      return;
+    }
     try {
       const { data } = await createClient().rpc('preview_invitation', { p_token: clean });
       if (data && typeof data === 'object') setPreviewData(data as typeof previewData);
@@ -64,7 +67,7 @@ function OnboardingContent() {
   }, []);
 
   useEffect(() => {
-    if (initialInvite && initialInvite.trim().length >= 6) handlePreviewInvite(initialInvite.trim());
+    if (initialInvite && initialInvite.length >= 6) handlePreviewInvite(initialInvite);
   }, [initialInvite, handlePreviewInvite]);
 
   async function handleCreateWorkspace(e: React.FormEvent) {
@@ -90,12 +93,7 @@ function OnboardingContent() {
   async function handleJoinWorkspace(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    let cleanToken = inviteToken.trim();
-    if (cleanToken.includes('/join/')) cleanToken = cleanToken.split('/join/').pop()?.split('?')[0] || cleanToken;
-    else if (cleanToken.includes('invite=')) {
-      try { cleanToken = new URL(cleanToken).searchParams.get('invite') || cleanToken; } catch { /* Not a URL */ }
-    }
-    cleanToken = cleanToken.trim().toUpperCase();
+    const cleanToken = extractInviteToken(inviteToken);
 
     const parsed = joinInvitationSchema.safeParse({ token: cleanToken });
     if (!parsed.success) { setError(parsed.error.issues[0]?.message || 'กรุณาระบุรหัสคำเชิญ'); return; }
@@ -110,10 +108,14 @@ function OnboardingContent() {
     } catch { setError('ไม่สามารถเข้าร่วมพื้นที่ทำงานได้ กรุณาตรวจสอบรหัสคำเชิญ'); setLoading(false); }
   }
 
-  function copyToClipboard(text: string, type: 'code' | 'link') {
-    navigator.clipboard.writeText(text);
-    if (type === 'code') { setCopiedCode(true); setTimeout(() => setCopiedCode(false), 2000); }
-    else { setCopiedLink(true); setTimeout(() => setCopiedLink(false), 2000); }
+  async function copyToClipboard(text: string, type: 'code' | 'link') {
+    try {
+      await navigator.clipboard.writeText(text);
+      if (type === 'code') { setCopiedCode(true); setTimeout(() => setCopiedCode(false), 2000); }
+      else { setCopiedLink(true); setTimeout(() => setCopiedLink(false), 2000); }
+    } catch {
+      setError('ไม่สามารถคัดลอกไปยังคลิปบอร์ดได้ กรุณาคัดลอกข้อความด้วยตนเอง');
+    }
   }
 
   return (
@@ -173,11 +175,11 @@ function OnboardingContent() {
             <form onSubmit={handleCreateWorkspace} className="space-y-4">
               <div>
                 <label htmlFor="workspaceName" className="block text-sm font-medium text-stone-700">ชื่อพื้นที่ทำงาน (Workspace) <span className="text-rose-600">*</span></label>
-                <input id="workspaceName" type="text" required value={workspaceName} onChange={(e) => setWorkspaceName(e.target.value)} placeholder="เช่น ฝ่ายพัฒนาผลิตภัณฑ์ หรือ Studio Alpha" className={`${UI_INPUT} mt-1.5 py-2.5`} />
+                <input id="workspaceName" type="text" required maxLength={120} value={workspaceName} onChange={(e) => setWorkspaceName(e.target.value)} placeholder="เช่น ฝ่ายพัฒนาผลิตภัณฑ์ หรือ Studio Alpha" className={`${UI_INPUT} mt-1.5 py-2.5`} />
               </div>
               <div>
                 <label htmlFor="firstTeamName" className="block text-sm font-medium text-stone-700">ชื่อทีมแรกของคุณ <span className="text-rose-600">*</span></label>
-                <input id="firstTeamName" type="text" required value={firstTeamName} onChange={(e) => setFirstTeamName(e.target.value)} placeholder="เช่น ทีมออกแบบและพัฒนา (Product Team)" className={`${UI_INPUT} mt-1.5 py-2.5`} />
+                <input id="firstTeamName" type="text" required maxLength={120} value={firstTeamName} onChange={(e) => setFirstTeamName(e.target.value)} placeholder="เช่น ทีมออกแบบและพัฒนา (Product Team)" className={`${UI_INPUT} mt-1.5 py-2.5`} />
               </div>
               {!showOptionalOrg ? (
                 <button type="button" onClick={() => setShowOptionalOrg(true)} className="inline-flex items-center gap-1.5 text-xs font-medium text-stone-500 hover:text-teal-700">
@@ -186,7 +188,7 @@ function OnboardingContent() {
               ) : (
                 <div>
                   <label htmlFor="organizationName" className="block text-sm font-medium text-stone-700">ชื่อองค์กร / บริษัท (ไม่บังคับ)</label>
-                  <input id="organizationName" type="text" value={organizationName} onChange={(e) => setOrganizationName(e.target.value)} placeholder="เช่น บริษัท อัลฟ่า เทคโนโลยี จำกัด" className={`${UI_INPUT} mt-1.5 py-2.5`} />
+                  <input id="organizationName" type="text" maxLength={120} value={organizationName} onChange={(e) => setOrganizationName(e.target.value)} placeholder="เช่น บริษัท อัลฟ่า เทคโนโลยี จำกัด" className={`${UI_INPUT} mt-1.5 py-2.5`} />
                 </div>
               )}
               <div className="pt-2">
@@ -207,6 +209,8 @@ function OnboardingContent() {
                 <p className="mt-1 text-sm text-stone-600">ทีม <strong>{createdInfo.team_name}</strong> พร้อมใช้งานแล้ว คุณสามารถส่งรหัสคำเชิญให้สมาชิกได้ทันที หรือข้ามไปทำภายหลังก็ได้</p>
               </div>
             </div>
+
+            {error && <StatusBanner type="error" message={error} />}
 
             <div className={`${UI_SUBCARD} p-5 space-y-4`}>
               <div>
@@ -246,7 +250,7 @@ function OnboardingContent() {
                 <ArrowLeft className="h-3.5 w-3.5" />ย้อนกลับไปเลือกวิธีเริ่มต้น
               </button>
               <h1 className="text-2xl font-bold text-stone-900">เข้าร่วมพื้นที่ทำงานด้วยคำเชิญ</h1>
-              <p className="mt-1 text-sm text-stone-600">กรอกรหัสคำเชิญ (เช่น BU-XXXXXXXXXX) หรือวางลิงก์ที่ได้รับจากหัวหน้าทีม</p>
+              <p className="mt-1 text-sm text-stone-600">กรอกรหัสคำเชิญ (เช่น BU-XXXXXXXXXXXXXXXX) หรือวางลิงก์ที่ได้รับจากหัวหน้าทีม</p>
             </div>
             {error && <StatusBanner type="error" message={error} />}
             <form onSubmit={handleJoinWorkspace} className="space-y-4">
@@ -256,11 +260,12 @@ function OnboardingContent() {
                   id="inviteToken"
                   type="text"
                   required
+                  maxLength={256}
                   value={inviteToken}
                   onChange={(e) => { setInviteToken(e.target.value); setPreviewData(null); }}
                   onBlur={(e) => handlePreviewInvite(e.target.value)}
-                  placeholder="BU-XXXXXXXXXX"
-                  className={`${UI_INPUT} mt-1.5 py-2.5 font-mono uppercase placeholder:font-sans placeholder:normal-case`}
+                  placeholder="BU-XXXXXXXXXXXXXXXX"
+                  className={`${UI_INPUT} mt-1.5 py-2.5 font-mono placeholder:font-sans`}
                 />
               </div>
               {previewData && previewData.valid && (
@@ -273,6 +278,9 @@ function OnboardingContent() {
                     </div>
                   </div>
                 </div>
+              )}
+              {previewData && !previewData.valid && previewData.reason && (
+                <StatusBanner type="error" message={previewData.reason} />
               )}
               <button type="submit" disabled={loading} className={`w-full ${UI_BTN_PRIMARY} py-3`}>
                 {loading ? <><Loader2 className="h-4 w-4 animate-spin" />กำลังเข้าร่วมทีม...</> : <>เข้าร่วมพื้นที่ทำงาน<ArrowRight className="h-4 w-4" /></>}

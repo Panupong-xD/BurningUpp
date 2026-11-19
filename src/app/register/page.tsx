@@ -4,14 +4,28 @@ import React, { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
-import { registerSchema } from '@/lib/validation';
+import { extractInviteToken, registerSchema } from '@/lib/validation';
 import { Logo } from '@/components/ui/Logo';
 import { StatusBanner, UI_BTN_PRIMARY, UI_CARD, UI_INPUT_LG, UI_LABEL_LG, UI_SUBCARD } from '@/components/ui/Surface';
 import { ArrowRight, Loader2, ShieldCheck } from 'lucide-react';
 
+function mapSignUpError(message: string): string {
+  const lower = message.toLowerCase();
+  if (lower.includes('already registered') || lower.includes('already been registered') || lower.includes('user_already_exists')) {
+    return 'อีเมลนี้มีในระบบแล้ว กรุณาเข้าสู่ระบบแทน';
+  }
+  if (lower.includes('rate limit') || lower.includes('too many')) {
+    return 'มีการส่งคำขอมากเกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง';
+  }
+  if (lower.includes('password')) {
+    return 'รหัสผ่านไม่ตรงตามเงื่อนไขความปลอดภัย กรุณาใช้รหัสผ่านอย่างน้อย 8 ตัวอักษร';
+  }
+  return 'ไม่สามารถสร้างบัญชีได้ในขณะนี้ กรุณาตรวจสอบข้อมูลแล้วลองใหม่';
+}
+
 function RegisterForm() {
   const router = useRouter();
-  const inviteCode = useSearchParams().get('invite') || '';
+  const inviteCode = extractInviteToken(useSearchParams().get('invite') || '');
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -32,14 +46,15 @@ function RegisterForm() {
         options: { data: { full_name: parsed.data.fullName } },
       });
       if (signUpError) {
-        setError(signUpError.message.toLowerCase().includes('already registered') ? 'อีเมลนี้มีในระบบแล้ว กรุณาเข้าสู่ระบบแทน' : signUpError.message || 'ไม่สามารถสร้างบัญชีได้ กรุณาลองใหม่');
+        setError(mapSignUpError(signUpError.message));
         setLoading(false);
         return;
       }
       if (!signUpData.session) {
         const { error: signInError } = await supabase.auth.signInWithPassword({ email: parsed.data.email, password: parsed.data.password });
         if (signInError) {
-          setError('สร้างบัญชีสำเร็จแล้ว กรุณาเข้าสู่ระบบ');
+          setError('สร้างบัญชีสำเร็จแล้ว กรุณาตรวจสอบอีเมลหรือเข้าสู่ระบบ');
+          setLoading(false);
           router.push(inviteCode ? `/login?invite=${encodeURIComponent(inviteCode)}` : '/login');
           return;
         }
@@ -65,15 +80,15 @@ function RegisterForm() {
           <form onSubmit={handleSubmit} className="space-y-4" noValidate>
             <div>
               <label htmlFor="fullName" className={UI_LABEL_LG}>ชื่อ-นามสกุล หรือชื่อที่ใช้แสดงในทีม</label>
-              <input id="fullName" type="text" autoComplete="name" required value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="เช่น พิมพ์ชนก ใจดี" className={UI_INPUT_LG} />
+              <input id="fullName" type="text" autoComplete="name" required maxLength={100} value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="เช่น พิมพ์ชนก ใจดี" className={UI_INPUT_LG} />
             </div>
             <div>
               <label htmlFor="email" className={UI_LABEL_LG}>อีเมล</label>
-              <input id="email" type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className={UI_INPUT_LG} />
+              <input id="email" type="email" autoComplete="email" required maxLength={254} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className={UI_INPUT_LG} />
             </div>
             <div>
-              <label htmlFor="password" className={UI_LABEL_LG}>รหัสผ่าน (อย่างน้อย 6 ตัวอักษร)</label>
-              <input id="password" type="password" autoComplete="new-password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="อย่างน้อย 6 ตัวอักษร" className={UI_INPUT_LG} />
+              <label htmlFor="password" className={UI_LABEL_LG}>รหัสผ่าน (อย่างน้อย 8 ตัวอักษร)</label>
+              <input id="password" type="password" autoComplete="new-password" required minLength={8} maxLength={72} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="อย่างน้อย 8 ตัวอักษร" className={UI_INPUT_LG} />
             </div>
             <div className={`${UI_SUBCARD} p-3.5 text-xs text-stone-600 leading-relaxed`}>
               <div className="flex items-center gap-1.5 font-semibold text-stone-800 mb-1"><ShieldCheck className="h-4 w-4 text-teal-700 shrink-0" />คำชี้แจงด้านความเป็นส่วนตัว</div>

@@ -3,13 +3,20 @@ import {
   buildTeamObservations,
   canDisplayAggregateAssessment,
   computeSampleAssessmentResult,
+  formatThaiDate,
+  formatThaiShortDate,
+  getBangkokIsoDateOffset,
+  getTodayIsoDate,
   type SampleScoringQuestion,
 } from '@/lib/wellbeing';
 import {
   createWorkspaceSchema,
+  extractInviteToken,
   followUpSchema,
   moodCheckinSchema,
   registerSchema,
+  resetPasswordSchema,
+  workspaceSettingsSchema,
 } from '@/lib/validation';
 import { INSUFFICIENT_DATA_MESSAGE } from '@/lib/constants';
 import type { TeamWellbeingInsights } from '@/types/database';
@@ -26,7 +33,7 @@ const SAMPLE_QUESTIONS: SampleScoringQuestion[] = [
   { id: 'q9', question_order: 9, category: 'work_engagement' },
 ];
 
-describe('Burning Upp — Unit Tests (Scoring, Privacy Safeguards & Validation)', () => {
+describe('Burning Upp — Unit Tests (Scoring, Privacy Safeguards, Validation & Bug Regression)', () => {
   it('computes sample burnout assessment scores and summary_level accurately', () => {
     const lowStrainAnswers = {
       q1: 2,
@@ -77,12 +84,36 @@ describe('Burning Upp — Unit Tests (Scoring, Privacy Safeguards & Validation)'
     expect(exact5.message).toBeNull();
   });
 
-  it('validates input schemas for registration, workspace creation, mood check-in, and follow-up', () => {
+  it('validates input schemas and enforces security boundaries', () => {
     expect(
       registerSchema.safeParse({
         fullName: 'สมชาย ใจดี',
         email: 'somchai@example.com',
         password: 'password123',
+      }).success
+    ).toBe(true);
+
+    // Password under 8 chars must fail
+    expect(
+      registerSchema.safeParse({
+        fullName: 'สมชาย ใจดี',
+        email: 'somchai@example.com',
+        password: 'short',
+      }).success
+    ).toBe(false);
+
+    // Reset password mismatch must fail
+    expect(
+      resetPasswordSchema.safeParse({
+        password: 'NewPassword123',
+        confirmPassword: 'DifferentPassword123',
+      }).success
+    ).toBe(false);
+
+    expect(
+      resetPasswordSchema.safeParse({
+        password: 'NewPassword123',
+        confirmPassword: 'NewPassword123',
       }).success
     ).toBe(true);
 
@@ -103,6 +134,36 @@ describe('Burning Upp — Unit Tests (Scoring, Privacy Safeguards & Validation)'
       }).success
     ).toBe(true);
 
+    // Invalid factors & oversized private note must fail
+    expect(
+      moodCheckinSchema.safeParse({
+        workspaceId: '550e8400-e29b-41d4-a716-446655440000',
+        entryDate: '2026-11-17',
+        moodLevel: 4,
+        factors: ['invalid_factor'],
+      }).success
+    ).toBe(false);
+
+    expect(
+      moodCheckinSchema.safeParse({
+        workspaceId: '550e8400-e29b-41d4-a716-446655440000',
+        entryDate: '2026-11-17',
+        moodLevel: 4,
+        privateNote: 'a'.repeat(2001),
+      }).success
+    ).toBe(false);
+
+    // Workspace min_group_size must be clamped 5..50
+    expect(
+      workspaceSettingsSchema.safeParse({ name: 'WS', minGroupSize: 4 }).success
+    ).toBe(false);
+    expect(
+      workspaceSettingsSchema.safeParse({ name: 'WS', minGroupSize: 51 }).success
+    ).toBe(false);
+    expect(
+      workspaceSettingsSchema.safeParse({ name: 'WS', minGroupSize: 5 }).success
+    ).toBe(true);
+
     expect(
       followUpSchema.safeParse({
         workspaceId: '550e8400-e29b-41d4-a716-446655440000',
@@ -111,6 +172,21 @@ describe('Burning Upp — Unit Tests (Scoring, Privacy Safeguards & Validation)'
         status: 'open',
       }).success
     ).toBe(true);
+  });
+
+  it('safely extracts and sanitizes invitation tokens from URLs and raw input', () => {
+    expect(extractInviteToken('bu-1234abcd')).toBe('BU-1234ABCD');
+    expect(extractInviteToken('https://burningupp.app/join/bu-abcd1234?ref=1')).toBe('BU-ABCD1234');
+    expect(extractInviteToken('https://burningupp.app/onboarding?invite=bu-9988aabb')).toBe('BU-9988AABB');
+    expect(extractInviteToken('BU-1234<script>alert(1)</script>')).toBe('BU-1234SCRIPTALERT1SCRIPT');
+    expect(extractInviteToken('/join/%E0%A4%A')).toBe('E0A4A');
+  });
+
+  it('formats Thailand calendar dates consistently without off-by-one timezone shifts', () => {
+    expect(formatThaiDate('2026-11-19')).toContain('19');
+    expect(formatThaiShortDate('2026-11-19')).toContain('19');
+    expect(getTodayIsoDate()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(getBangkokIsoDateOffset(14)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   it('generates contextual observations without labeling individuals or treating missing data as neutral', () => {

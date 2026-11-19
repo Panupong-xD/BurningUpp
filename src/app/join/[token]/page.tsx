@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { extractInviteToken } from '@/lib/validation';
 import { Logo } from '@/components/ui/Logo';
 import { ArrowRight, Users } from 'lucide-react';
 
@@ -10,7 +11,13 @@ export default async function JoinInvitationPage({
   params: Promise<{ token: string }>;
 }) {
   const { token } = await params;
-  const cleanToken = decodeURIComponent(token).trim().toUpperCase();
+  let decoded = token;
+  try {
+    decoded = decodeURIComponent(token);
+  } catch {
+    decoded = token;
+  }
+  const cleanToken = extractInviteToken(decoded);
 
   const supabase = await createServerSupabaseClient();
   const {
@@ -18,7 +25,11 @@ export default async function JoinInvitationPage({
   } = await supabase.auth.getUser();
 
   if (user) {
-    redirect(`/onboarding?invite=${encodeURIComponent(cleanToken)}`);
+    redirect(
+      cleanToken
+        ? `/onboarding?invite=${encodeURIComponent(cleanToken)}`
+        : '/onboarding?mode=join'
+    );
   }
 
   return (
@@ -30,9 +41,11 @@ export default async function JoinInvitationPage({
             <Users className="h-6 w-6" />
           </div>
           <div className="space-y-1.5">
-            <span className="inline-block rounded-full bg-stone-100 px-3 py-1 text-xs font-mono font-semibold text-stone-700">
-              รหัสคำเชิญ: {cleanToken}
-            </span>
+            {cleanToken && (
+              <span className="inline-block rounded-full bg-stone-100 px-3 py-1 text-xs font-mono font-semibold text-stone-700">
+                รหัสคำเชิญ: {cleanToken}
+              </span>
+            )}
             <h1 className="text-xl font-bold text-stone-900 pt-1">
               คุณได้รับคำเชิญเข้าร่วมทีมบน Burning Upp
             </h1>
@@ -43,14 +56,14 @@ export default async function JoinInvitationPage({
 
           <div className="space-y-3 pt-2">
             <Link
-              href={`/register?invite=${encodeURIComponent(cleanToken)}`}
+              href={cleanToken ? `/register?invite=${encodeURIComponent(cleanToken)}` : '/register'}
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-teal-700 px-4 py-3 text-sm font-semibold text-white shadow-xs transition hover:bg-teal-800"
             >
               สมัครสมาชิกใหม่เพื่อเข้าร่วมทีม
               <ArrowRight className="h-4 w-4" />
             </Link>
             <Link
-              href={`/login?invite=${encodeURIComponent(cleanToken)}`}
+              href={cleanToken ? `/login?invite=${encodeURIComponent(cleanToken)}` : '/login'}
               className="flex w-full items-center justify-center gap-2 rounded-xl border border-stone-300 bg-white px-4 py-3 text-sm font-medium text-stone-700 transition hover:bg-stone-50"
             >
               มีบัญชีอยู่แล้ว? เข้าสู่ระบบ
